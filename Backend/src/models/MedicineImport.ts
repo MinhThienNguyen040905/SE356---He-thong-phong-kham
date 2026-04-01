@@ -1,0 +1,101 @@
+import { Model, DataTypes, Optional } from "sequelize";
+import sequelize from "../config/database";
+import Medicine from "./Medicine";
+
+interface MedicineImportAttributes {
+  id: number;
+  medicineId: number;
+  quantity: number;
+  importPrice: number;
+  importDate: Date;
+  userId: number;
+  importCode: string;
+  supplier?: string;
+  supplierInvoice?: string;
+  batchNumber?: string;
+  note?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+interface MedicineImportCreationAttributes
+  extends Optional<MedicineImportAttributes, "id"> {}
+
+class MedicineImport
+  extends Model<MedicineImportAttributes, MedicineImportCreationAttributes>
+  implements MedicineImportAttributes
+{
+  public id!: number;
+  public medicineId!: number;
+  public quantity!: number;
+  public importPrice!: number;
+  public importDate!: Date;
+  public userId!: number;
+  public importCode!: string;
+  public supplier?: string;
+  public supplierInvoice?: string;
+  public batchNumber?: string;
+  public note?: string;
+  public readonly createdAt!: Date;
+  public readonly updatedAt!: Date;
+}
+
+MedicineImport.init(
+  {
+    id: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+    medicineId: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: false,
+      references: { model: Medicine, key: "id" },
+    },
+    quantity: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+    importPrice: {
+      type: DataTypes.DECIMAL(10, 2),
+      allowNull: false,
+    },
+    importDate: {
+      type: DataTypes.DATE,
+      allowNull: false,
+    },
+    userId: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: false,
+    },
+    importCode: {
+      type: DataTypes.STRING(50),
+      allowNull: false,
+      unique: true,
+    },
+    supplier: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    supplierInvoice: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    batchNumber: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    note: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+  },
+  {
+    sequelize,
+    modelName: "MedicineImport",
+    tableName: "medicine_imports",
+    timestamps: true,
+  }
+);
+
+export default MedicineImport;

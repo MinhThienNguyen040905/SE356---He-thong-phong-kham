@@ -1,0 +1,95 @@
+import { DataTypes, Model, Optional } from "sequelize";
+import sequelize from "../config/database";
+import User from "./User";
+import Specialty from "./Specialty";
+
+interface DoctorAttributes {
+  id: number;
+  doctorCode: string;
+  userId: number;
+  specialtyId?: number | null;
+  position?: string;
+  degree?: string;
+  description?: string;
+  isActive: boolean;
+}
+
+interface DoctorCreationAttributes
+  extends Optional<DoctorAttributes, "id" | "doctorCode" | "isActive"> {}
+
+class Doctor
+  extends Model<DoctorAttributes, DoctorCreationAttributes>
+  implements DoctorAttributes
+{
+  public id!: number;
+  public doctorCode!: string;
+  public userId!: number;
+  public specialtyId?: number | null;
+  public position?: string;
+  public degree?: string;
+  public description?: string;
+  public isActive!: boolean;
+}
+
+Doctor.init(
+  {
+    id: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+    doctorCode: {
+      type: DataTypes.STRING(10),
+      allowNull: false,
+      unique: true,
+    },
+    userId: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: false,
+      references: { model: User, key: "id" },
+    },
+    specialtyId: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: true,
+      references: { model: Specialty, key: "id" },
+    },
+    position: {
+      type: DataTypes.STRING(100),
+    },
+    degree: {
+      type: DataTypes.STRING(100),
+    },
+    description: {
+      type: DataTypes.STRING(255),
+    },
+    isActive: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: true,
+    },
+  },
+  {
+    sequelize,
+    tableName: "doctors",
+    timestamps: true,
+    hooks: {
+      afterUpdate: async (doctor: Doctor, options: any) => {
+        if (options.syncing) return;
+        const Employee = sequelize.models.Employee;
+        if (Employee) {
+          await Employee.update({
+            employeeCode: doctor.doctorCode,
+            specialtyId: doctor.specialtyId,
+            position: doctor.position,
+            degree: doctor.degree,
+            description: doctor.description
+          }, { 
+            where: { userId: doctor.userId },
+            hooks: false
+          } as any);
+        }
+      }
+    }
+  }
+);
+
+export default Doctor;
