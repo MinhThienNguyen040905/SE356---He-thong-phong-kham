@@ -22,7 +22,11 @@
    - 3.2. Implementation View
    - 3.3. Deployment View
    - 3.4. Data View
+   - 3.5. Process View
+   - 3.6. Security View
 4. [Phụ lục: Traceability ASR ↔ ADD](#4-ph%E1%BB%A5-l%E1%BB%A5c-traceability-asr--add)
+
+> Diagrams trong tài liệu này dùng cú pháp **Mermaid**. Render tốt trong VS Code (extension *Markdown Preview Mermaid Support*), GitHub, GitLab, Obsidian, Typora.
 
 ---
 
@@ -339,30 +343,132 @@
 
 ## 3. Architectural Representation
 
-Để mô tả kiến trúc Hệ thống Quản lý Phòng khám, bốn view sau được trình bày.
+Để mô tả kiến trúc Hệ thống Quản lý Phòng khám, **sáu view** sau được trình bày: bốn view tĩnh (Logical, Implementation, Deployment, Data) mô tả "hệ thống là gì"; hai view bổ sung (Process, Security) mô tả "hệ thống chạy như thế nào" và "hệ thống tự bảo vệ thế nào".
 
 ### 3.1. Logical View
 
-View này phân rã hệ thống thành các subsystem chức năng.
+View này phân rã hệ thống thành các subsystem chức năng và thấy được phụ thuộc lớn giữa chúng.
+
+```mermaid
+graph TB
+    Client["Frontend Web<br/>(React + Vite)<br/>+ External clients"]
+
+    subgraph API_Tier["API Tier (Backend monolith)"]
+        MW["Cross-cutting Middleware Pipeline<br/>security headers · CORS · rate limit · validate ·<br/>sanitize · auth · permission · audit · cache · error handler"]
+
+        subgraph Domains["Domain Modules"]
+            AUTH[Authentication]
+            IDM[User / Employee /<br/>Patient / Doctor]
+            APPT[Appointment & Visit]
+            RX[Prescription]
+            INV[Inventory<br/>Medicine I/E]
+            FIN[Finance<br/>Invoice · Payment · Payroll]
+            SFT[Shift & Attendance]
+            NOT[Notification]
+            ADM[Admin / Audit / Report /<br/>System Settings]
+        end
+
+        EVT(((Event Emitter)))
+        JOB[Scheduler<br/>node-cron]
+    end
+
+    subgraph DataTier["Data Tier"]
+        DB[("MySQL<br/>(Sequelize)")]
+        R[("Redis<br/>blacklist · cache · rate limit")]
+        FS[/"File storage<br/>uploads/"/]
+    end
+
+    subgraph External["External Services"]
+        SMTP{{SMTP Email}}
+        OA{{Google OAuth}}
+    end
+
+    Client --> MW
+    MW --> AUTH & IDM & APPT & RX & INV & FIN & SFT & NOT & ADM
+    APPT -. emit .-> EVT
+    FIN -. emit .-> EVT
+    INV -. emit .-> EVT
+    EVT -. listen .-> NOT
+    JOB --> APPT & INV & SFT
+    AUTH --> R
+    AUTH --> OA
+    NOT --> SMTP
+    AUTH & IDM & APPT & RX & INV & FIN & SFT & NOT & ADM --> DB
+    IDM --> FS
+```
 
 **Subsystems:**
 
 - **Authentication module** – Đăng ký, đăng nhập mật khẩu / OAuth Google / OTP, đặt lại mật khẩu, thu hồi token.
 - **User & Employee module** – Hồ sơ người dùng và nhân viên, quản trị Role–Permission, ảnh đại diện.
-- **Patient module** – Hồ sơ bệnh nhân, ảnh đại diện, thông tin sức khỏe.
+- **Patient module** – Hồ sơ bệnh nhân, thông tin sức khỏe.
 - **Doctor & Specialty module** – Hồ sơ bác sĩ, chuyên khoa.
-- **Appointment & Visit module** – Đặt lịch (online / offline), hủy / đổi lịch, check-in / check-out, ghi chẩn đoán + triệu chứng + dấu hiệu sinh tồn.
+- **Appointment & Visit module** – Đặt lịch (online / offline), hủy / đổi lịch, check-in / check-out, chẩn đoán + triệu chứng + dấu hiệu sinh tồn.
 - **Prescription module** – Kê đơn theo visit, chi tiết đơn thuốc.
 - **Inventory module** – Quản lý thuốc, nhập / xuất kho, cảnh báo hết hạn.
 - **Finance module** – Hóa đơn, mục hóa đơn, thanh toán, hoàn tiền, bảng lương.
 - **Shift & Attendance module** – Mẫu ca, sinh lịch trực tự động, gán ca cho bác sĩ, chấm công.
-- **Notification module** – Thông báo in-app, email, cài đặt thông báo cá nhân, event emitter nội bộ.
+- **Notification module** – Thông báo in-app, email, cài đặt thông báo cá nhân.
 - **Admin module** – Audit log, dashboard, báo cáo PDF / Excel, cấu hình hệ thống, maintenance mode.
 - **Cross-cutting middleware** – Security headers, CORS, rate limit, body parser, validate, sanitize, auth, permission, audit, cache, error handler.
 
 Các module giao tiếp qua **service API nội bộ** (không qua model trực tiếp). Sự kiện nghiệp vụ giữa các module (ví dụ Appointment → Notification) đi qua **event emitter nội bộ**.
 
+---
+
 ### 3.2. Implementation View
+
+View này thấy cách mã nguồn được phân tầng và tổ chức thành package.
+
+```mermaid
+graph TB
+    subgraph Frontend["Frontend (Vite + React)"]
+        FPAGES["pages/{role}/"]
+        FFEAT["features/{role}/"]
+        FSHARED["components · hooks · lib · utils"]
+    end
+
+    subgraph Backend["Backend src/"]
+        subgraph Entry["Entry layer"]
+            APP["app.ts<br/>(Express bootstrap)"]
+            ROUTES["modules/*/routes.ts"]
+        end
+        subgraph Domain["Domain layer (per module)"]
+            CTRL["modules/*/controller.ts"]
+            SVC["modules/*/service.ts"]
+            VAL["modules/*/validator.ts"]
+        end
+        subgraph Cross["Cross-cutting"]
+            MW2["middlewares/<br/>(auth · permission · audit ·<br/>rate limit · cache · sanitize · ...)"]
+            JBS["jobs/<br/>(node-cron handlers)"]
+            EVTS["events/<br/>(internal emitter)"]
+        end
+        subgraph Persist["Persistence"]
+            MOD["models/<br/>(Sequelize entities)"]
+            MIG["migrations/<br/>(schema versioning)"]
+        end
+        subgraph Shared["Shared infrastructure"]
+            CFG["config/<br/>(db · redis · oauth · env)"]
+            UTL["utils/<br/>(stateMachine · codeGen)"]
+            TPL["templates/<br/>(email · pdf)"]
+            ISVC["services/<br/>(email · cache)"]
+        end
+    end
+
+    FPAGES --> FFEAT --> FSHARED
+    FSHARED -. HTTPS API .-> ROUTES
+    APP --> ROUTES
+    ROUTES --> CTRL
+    CTRL --> SVC
+    CTRL --> VAL
+    SVC --> MOD
+    SVC --> ISVC
+    MW2 -. applied to .-> ROUTES
+    JBS --> SVC
+    EVTS -. emit / listen .-> SVC
+    MOD --> MIG
+    CFG --> APP
+```
 
 **Structure:**
 
@@ -380,19 +486,71 @@ Các module giao tiếp qua **service API nội bộ** (không qua model trực 
 - **Database:** MySQL 8 (qua mysql2 + Sequelize); Redis cho token blacklist, cache, rate limit counter.
 - **CI/CD:** Build với `tsc`; containerize Backend + Frontend bằng Docker; pipeline test với Jest.
 
+---
+
 ### 3.3. Deployment View
+
+View này thấy cách hệ thống chạy trên hạ tầng thực tế.
+
+```mermaid
+graph TB
+    Users(["End users<br/>Browser / Mobile"])
+
+    subgraph Edge["Edge"]
+        CDN["CDN<br/>Frontend static"]
+        LB["Reverse Proxy / Load Balancer<br/>(Nginx · Cloud LB)<br/>HTTPS termination · trust proxy"]
+    end
+
+    subgraph AppTier["Application Tier — stateless, N instances"]
+        API1["Backend API #1<br/>Node.js + Express"]
+        API2["Backend API #2"]
+        APIN["Backend API #N"]
+        SCH["Scheduler<br/>(leader instance only)<br/>auto no-show · expiry · attendance"]
+    end
+
+    subgraph DataTierD["Data Tier"]
+        MYSQLP[("MySQL Primary")]
+        MYSQLR[("MySQL Replica<br/>(read scaling)")]
+        REDIS[("Redis cluster<br/>blacklist · cache · rate limit counter")]
+        OBJ[/"Object storage<br/>uploads/ avatar · symptom images"/]
+    end
+
+    subgraph Observ["Observability"]
+        LOG[["Log aggregator<br/>ELK / Loki"]]
+        MON[["Prometheus + Grafana"]]
+    end
+
+    subgraph ExtDep["External Dependencies"]
+        SMTP{{SMTP server}}
+        GOA{{Google OAuth}}
+    end
+
+    Users --> CDN
+    Users --> LB
+    LB --> API1 & API2 & APIN
+    API1 & API2 & APIN --> MYSQLP
+    API1 & API2 & APIN -.read.-> MYSQLR
+    MYSQLP -. replicate .-> MYSQLR
+    API1 & API2 & APIN --> REDIS
+    API1 & API2 & APIN --> OBJ
+    API1 & API2 & APIN --> SMTP
+    API1 & API2 & APIN --> GOA
+    SCH --> MYSQLP
+    SCH --> REDIS
+    API1 & API2 & APIN -.metrics/logs.-> LOG
+    API1 & API2 & APIN -.metrics.-> MON
+```
 
 **Environment:**
 
 - Triển khai trên cloud (AWS / GCP / Azure) hoặc on-prem server tại phòng khám.
-- **Reverse proxy / Load balancer** (Nginx hoặc cloud LB) đứng trước Backend; bật `trust proxy` để rate limit hoạt động đúng phía sau proxy.
-- **Backend API tier** chạy nhiều instance Node.js stateless; phục vụ static `/uploads` qua reverse proxy (CDN nếu có).
+- **Reverse proxy / Load balancer** đứng trước Backend; bật `trust proxy` để rate limit hoạt động đúng phía sau proxy.
+- **Backend API tier** chạy nhiều instance Node.js stateless.
 - **Frontend** build tĩnh, host trên CDN hoặc tích hợp với reverse proxy.
 - **MySQL** chạy primary + replica (nếu cần read scaling).
-- **Redis** chạy single-node hoặc cluster, dùng cho token blacklist, cache, rate limit counter; là điều kiện để API tier thực sự stateless khi scale ≥ 2 instance.
+- **Redis** là điều kiện để API tier thực sự stateless khi scale ≥ 2 instance.
 - **Scheduler** chạy ở một instance duy nhất (leader) để tránh trùng job.
-- **File storage** – `uploads/` cho avatar, ảnh triệu chứng; có thể chuyển sang object storage khi scale.
-- **Monitoring** – log tổng hợp qua Winston / Morgan; có thể export sang ELK hoặc Prometheus / Grafana.
+- **Monitoring** – log tổng hợp; có thể export sang ELK hoặc Prometheus / Grafana.
 
 **Deployment Example:**
 
@@ -400,11 +558,51 @@ Các module giao tiếp qua **service API nội bộ** (không qua model trực 
 - Backend container hoá bằng Docker; orchestration tuỳ chọn (Docker Compose cho phòng khám đơn lẻ, Kubernetes cho chuỗi phòng khám).
 - HTTPS bắt buộc ở reverse proxy; mTLS / token bảo vệ giữa backend ↔ Redis ↔ MySQL trong môi trường shared.
 
+---
+
 ### 3.4. Data View
+
+View này tập trung vào mô hình dữ liệu cốt lõi và quan hệ chính giữa các thực thể (mức cao, không phải full schema).
+
+```mermaid
+erDiagram
+    USER ||--o| PATIENT : "is-a (optional)"
+    USER ||--o| EMPLOYEE : "is-a (optional)"
+    EMPLOYEE ||--o| DOCTOR : "is-a (optional)"
+    USER }o--|| ROLE : has
+    ROLE }o--o{ PERMISSION : "via RolePermission"
+
+    DOCTOR }o--|| SPECIALTY : "belongs-to"
+    SHIFT_TEMPLATE ||--o{ SHIFT : derives
+    SHIFT ||--o{ DOCTOR_SHIFT : "instance of"
+    DOCTOR ||--o{ DOCTOR_SHIFT : "assigned to"
+
+    PATIENT ||--o{ APPOINTMENT : books
+    DOCTOR ||--o{ APPOINTMENT : "scheduled for"
+    DOCTOR_SHIFT ||--o{ APPOINTMENT : "slot in"
+    APPOINTMENT ||--|| VISIT : produces
+    VISIT ||--o| PRESCRIPTION : has
+    PRESCRIPTION ||--o{ PRESCRIPTION_DETAIL : contains
+    MEDICINE ||--o{ PRESCRIPTION_DETAIL : "prescribed in"
+
+    VISIT ||--|| INVOICE : "billed by"
+    INVOICE ||--o{ INVOICE_ITEM : contains
+    INVOICE ||--o{ PAYMENT : "paid by"
+    INVOICE ||--o{ REFUND : refunds
+    MEDICINE ||--o{ MEDICINE_IMPORT : "stocked by"
+    MEDICINE ||--o{ MEDICINE_EXPORT : "dispensed by"
+
+    EMPLOYEE ||--o{ ATTENDANCE : records
+    EMPLOYEE ||--o{ PAYROLL : earns
+
+    USER ||--o{ NOTIFICATION : receives
+    USER ||--o| NOTIFICATION_SETTING : configures
+    USER ||--o{ AUDIT_LOG : "actor of"
+```
 
 **Primary Storage:**
 
-- **MySQL (qua Sequelize)** – Store nghiệp vụ chính:
+- **MySQL (qua Sequelize)** – Store nghiệp vụ chính, gồm các domain:
   - Định danh & phân quyền: `User`, `Role`, `Permission`, `RolePermission`.
   - Bệnh nhân & nhân viên: `Patient`, `PatientProfile`, `Employee`, `Doctor`, `Specialty`.
   - Ca trực & chấm công: `Shift`, `ShiftTemplate`, `DoctorShift`, `Attendance`.
@@ -430,6 +628,238 @@ Các module giao tiếp qua **service API nội bộ** (không qua model trực 
 - Mật khẩu hash bằng bcrypt + salt; bí mật tách khỏi mã nguồn và validate khi khởi động.
 - Truy cập MySQL / Redis hạn chế theo network policy; tài khoản ứng dụng có quyền tối thiểu.
 - Audit log lưu ai – làm gì – khi nào – giá trị trước / sau, đủ cho yêu cầu compliance nội bộ.
+
+---
+
+### 3.5. Process View
+
+View này mô tả hành vi runtime của các luồng nghiệp vụ nhạy cảm — nơi xảy ra concurrency, transaction, retry, fallback.
+
+#### 3.5.1. Concurrent appointment booking (đáp ứng ASR-DI-01)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User (Patient / Recep)
+    participant API as API Gateway
+    participant SVC as Appointment Service
+    participant DB as MySQL
+
+    U->>API: POST /api/appointments
+    API->>API: verifyToken · permission · validate · sanitize
+    API->>SVC: createAppointment(input)
+    SVC->>DB: BEGIN TRANSACTION (READ COMMITTED)
+    SVC->>DB: SELECT DoctorShift WHERE (doctorId, shiftId, date) FOR UPDATE
+    Note over DB: Row-level lock acquired
+    SVC->>DB: SELECT COUNT(*) FROM Appointment for this shift
+    alt slots available & shift not ended
+        SVC->>DB: INSERT INTO Appointment (generated code)
+        SVC->>DB: COMMIT
+        SVC-->>API: appointment created
+        API-->>U: 201 + appointment
+    else slots full / SHIFT_ALREADY_ENDED
+        SVC->>DB: ROLLBACK
+        SVC-->>API: throw SLOTS_FULL / SHIFT_ALREADY_ENDED
+        API-->>U: 409 / 400 error
+    end
+```
+
+#### 3.5.2. Atomic invoice + inventory dispense (đáp ứng ASR-DI-02)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor R as Receptionist
+    participant API as API Gateway
+    participant FIN as Finance Service
+    participant INV as Inventory Service
+    participant DB as MySQL
+
+    R->>API: POST /api/invoices (visitId, items[])
+    API->>FIN: createInvoice(visitId, items)
+    FIN->>DB: BEGIN TRANSACTION
+    FIN->>DB: INSERT Invoice (code, total, status=PENDING)
+    loop for each medicine item
+        FIN->>INV: dispense(medicineId, qty, tx)
+        INV->>DB: UPDATE Medicine SET stock = stock - qty WHERE stock >= qty
+        alt stock OK
+            INV->>DB: INSERT MedicineExport
+            FIN->>DB: INSERT InvoiceItem
+        else stock insufficient
+            INV-->>FIN: throw STOCK_INSUFFICIENT
+            FIN->>DB: ROLLBACK
+            FIN-->>API: error
+            API-->>R: 409 STOCK_INSUFFICIENT
+        end
+    end
+    FIN->>DB: UPDATE Visit.status = INVOICED (via state machine)
+    FIN->>DB: COMMIT
+    FIN-->>API: invoice ready
+    API-->>R: 201 + invoice
+```
+
+#### 3.5.3. Authentication, request validation và token revocation (đáp ứng ASR-SEC-01)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant API as API Gateway
+    participant AUTH as Auth Service
+    participant DB as MySQL
+    participant R as Redis
+
+    rect rgb(238,247,238)
+        Note over U,R: Login flow
+        U->>API: POST /api/auth/login (email, password)
+        API->>AUTH: login(credentials)
+        AUTH->>DB: SELECT user WHERE email
+        AUTH->>AUTH: bcrypt.compare(password, hash)
+        AUTH->>AUTH: sign JWT (userId, roleId, exp)
+        AUTH-->>API: { token }
+        API-->>U: 200 + token
+    end
+
+    rect rgb(247,238,238)
+        Note over U,R: Authenticated request
+        U->>API: GET /api/<resource> (Bearer token)
+        API->>R: GET blacklist:token:&lt;jwt&gt;
+        alt not blacklisted
+            R-->>API: nil
+            API->>API: jwt.verify(token)
+            API->>API: resolve patientId / doctorId from JWT
+            API-->>U: 200 + data
+        else blacklisted
+            R-->>API: "1"
+            API-->>U: 401 TOKEN_REVOKED
+        end
+    end
+
+    rect rgb(247,247,238)
+        Note over U,R: Logout / password change
+        U->>API: POST /api/auth/logout
+        API->>R: SETEX blacklist:token:&lt;jwt&gt; ttl=&lt;remaining lifetime&gt;
+        API-->>U: 200
+        Note right of R: Subsequent use of the same<br/>token is rejected within ≤ 1s
+    end
+```
+
+#### 3.5.4. Scheduled auto-no-show job (đáp ứng ASR-AVL-01)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CRON as node-cron<br/>(every 30 min)
+    participant JOB as Auto-No-Show Job
+    participant SVC as Appointment Service
+    participant DB as MySQL
+    participant EVT as Event Emitter
+    participant NOT as Notification
+
+    CRON->>JOB: trigger at scheduled time
+    JOB->>DB: SELECT appointments<br/>WHERE status=SCHEDULED<br/>AND shiftEndTime < now()
+    loop for each candidate
+        JOB->>SVC: transition(appointmentId, NO_SHOW)
+        SVC->>SVC: state machine check (allowed?)
+        alt valid transition
+            SVC->>DB: UPDATE Appointment SET status=NO_SHOW
+            SVC->>DB: UPDATE Patient SET noShowCount += 1
+            SVC-->>EVT: emit AppointmentNoShow
+            EVT->>NOT: notify patient
+        else invalid
+            SVC-->>JOB: skip
+        end
+    end
+    JOB->>JOB: log result (success / failure count)
+```
+
+---
+
+### 3.6. Security View
+
+View này gom mọi quyết định an ninh thành một bức tranh thống nhất.
+
+#### 3.6.1. Request defense pipeline (đáp ứng ASR-SEC-01 → SEC-04)
+
+```mermaid
+flowchart LR
+    REQ([Incoming HTTPS request]) --> H[helmet<br/>security headers]
+    H --> CORS[CORS<br/>origin check]
+    CORS --> RL[rate limit<br/>per IP / user]
+    RL -- exceeded --> R429([429 Too Many Requests])
+    RL -- ok --> BP[body parser<br/>10mb limit]
+    BP --> MAINT{maintenance<br/>mode?}
+    MAINT -- on, non-admin --> R503([503 Maintenance])
+    MAINT -- off / admin --> AUTH[verifyToken<br/>+ blacklist check]
+    AUTH -- invalid --> R401([401 INVALID_TOKEN])
+    AUTH -- valid --> CTX[resolve context<br/>patientId / doctorId from JWT]
+    CTX --> VAL[express-validator<br/>schema check]
+    VAL -- invalid --> R400([400 VALIDATION_ERROR])
+    VAL -- valid --> SAN[sanitize<br/>dompurify]
+    SAN --> PERM[requirePermission<br/>RBAC check]
+    PERM -- denied --> R403([403 PERMISSION_DENIED])
+    PERM -- allowed --> SCOPE[self-scope guard<br/>if role=PATIENT]
+    SCOPE -- mismatch --> R403B([403 OUT_OF_SCOPE])
+    SCOPE -- ok --> CTRL[Controller / Service]
+    CTRL --> AUDIT[audit middleware<br/>log mutating action]
+    AUDIT --> RES([2xx response])
+```
+
+#### 3.6.2. RBAC model (đáp ứng ASR-SEC-02)
+
+```mermaid
+erDiagram
+    USER }o--|| ROLE : has
+    ROLE ||--o{ ROLE_PERMISSION : "linked by"
+    ROLE_PERMISSION }o--|| PERMISSION : grants
+
+    USER {
+        int id PK
+        int roleId FK
+        string email
+        string passwordHash
+    }
+    ROLE {
+        int id PK
+        string name "ADMIN · DOCTOR · RECEPTIONIST · PATIENT"
+    }
+    PERMISSION {
+        int id PK
+        string module
+        string name "patients.create · appointments.cancel · invoices.refund · ..."
+    }
+    ROLE_PERMISSION {
+        int roleId FK
+        int permissionId FK
+    }
+```
+
+#### 3.6.3. Token lifecycle (đáp ứng ASR-SEC-01)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Issued: login / OAuth / OTP success
+    Issued --> Active: client uses token
+    Active --> Active: verified each request<br/>(jwt + blacklist check)
+    Active --> Revoked: logout · password change ·<br/>admin lock
+    Active --> Expired: TTL reached
+    Revoked --> Cleaned: blacklist entry expires<br/>(TTL = remaining lifetime)
+    Cleaned --> [*]
+    Expired --> [*]
+```
+
+#### 3.6.4. Defense-in-depth summary
+
+| Layer | Tactic | ASR liên quan |
+| --- | --- | --- |
+| Transport | HTTPS bắt buộc ở reverse proxy; mTLS giữa backend ↔ Redis / MySQL khi shared | ASR-SEC-05 |
+| Edge | helmet headers, CORS allow-list, rate limit per IP/user, body size cap | ASR-SEC-04, ASR-PERF-02 |
+| Identity | JWT stateless + Redis blacklist; bcrypt + salt; OTP qua email; OAuth Google | ASR-SEC-01, ASR-SEC-05 |
+| Authorization | RBAC (Role × Permission), self-scope cho bệnh nhân | ASR-SEC-02, ASR-SEC-03 |
+| Input | express-validator schema + isomorphic-dompurify sanitize | ASR-SEC-04 |
+| State change | Centralized state machine cho lifecycle | ASR-DI-03 |
+| Observability | Audit log đầy đủ giá trị trước/sau cho mọi mutating action | ASR-DI-04, ASR-MAN-01 |
+| Secret | Biến môi trường + env validation khi khởi động | ASR-SEC-05 |
 
 ---
 
