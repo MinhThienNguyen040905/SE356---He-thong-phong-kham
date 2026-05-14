@@ -52,6 +52,14 @@
    - 7.1. Đảm bảo hiệu năng
    - 7.2. Phương án mở rộng
 8. Rủi ro và phương án giảm thiểu
+9. Known Limitations và Future Work
+   - 9.1. In-process scheduler chạy ở mọi instance
+   - 9.2. Rate limit counter in-process
+   - 9.3. Cache middleware in-process
+   - 9.4. Pagination chưa bắt buộc đồng đều
+   - 9.5. Cổng thanh toán online chưa nối
+   - 9.6. Triển khai single-region
+   - 9.7. Bảng tóm tắt mức độ ưu tiên
 
 ---
 
@@ -416,7 +424,7 @@ graph TB
 | AD-005 | **State machine tập trung cho Appointment / Visit / Invoice** | Nhiều API và role cùng cập nhật trạng thái — nếu không tập trung sẽ rải if/else khắp controller. State machine giúp transition tường minh, dễ test, dễ extend. | Cần kỷ luật code: mọi update status phải đi qua state machine, không update trực tiếp. |
 | AD-006 | **Internal event bus (Node.js EventEmitter) thay vì message broker ngoài** | Quy mô không cần message broker; internal event bus đủ cho fan-out trong cùng process. Tránh phụ thuộc Kafka / RabbitMQ. | Nếu scale lên nhiều process / nhiều instance, internal event bus không cross-instance. Khi đó cần đổi sang Redis Pub/Sub hoặc message broker thực sự. |
 | AD-007 | **Audit log qua cross-cutting middleware, ghi bất đồng bộ** | Đảm bảo 100% endpoint mutating được audit mà không phải nhớ gọi explicit. Ghi bất đồng bộ để không tăng độ trễ. | Nếu audit ghi lỗi, request chính vẫn thành công → có rủi ro mất audit (nhỏ). Cần monitor failure rate của audit. |
-| AD-008 | **In-process cron scheduler thay vì cron riêng / job queue** | Đơn giản, không cần infrastructure ngoài. Phù hợp các tác vụ nhỏ (auto-no-show, expiry check). | Khi scale nhiều instance phải có cơ chế leader. Job lỗi không retry tự động — phải code retry trong handler. |
+| AD-008 | **In-process cron scheduler thay vì cron riêng / job queue** | Đơn giản, không cần infrastructure ngoài. Phù hợp các tác vụ nhỏ (auto-no-show, expiry check). Hiện tại scheduler khởi tạo trực tiếp trong `server.ts` qua `initializeScheduler()` cho mọi instance. | Khi scale nhiều instance, **cần thêm cơ chế leader election** (ví dụ env flag `ENABLE_SCHEDULER=true` chỉ ở một instance, hoặc Redis distributed lock) để tránh trùng job — chi tiết ở mục *Known Limitations*. Job lỗi không retry tự động — phải code retry trong handler. |
 | AD-009 | **Sinh Excel / PDF inline trong API thay vì service riêng** | Quy mô báo cáo nhỏ; thư viện `pdfkit` + `exceljs` chạy đủ nhanh trong process. | Báo cáo lớn (export hàng chục nghìn record) có thể block process — khi đó nên chuyển sang queue + worker. |
 | AD-010 | **Frontend phân vùng theo vai trò (admin / doctor / recep / patient)** | Mỗi vai trò có UX rất khác nhau. Phân vùng theo `pages/{role}` và `features/{role}` giúp lazy-load và phát triển song song. | Một số component dùng chung phải lift lên shared — cần kỷ luật về phân loại. |
 
@@ -575,7 +583,7 @@ sequenceDiagram
 
     alt count < maxSlots && shift chưa kết thúc
         SVC->>SVC: generateAppointmentCode()
-        SVC->>DB: INSERT INTO Appointment (...)<br/>VALUES (..., 'SCHEDULED', code)
+        SVC->>DB: INSERT INTO Appointment (...)<br/>VALUES (..., 'WAITING', code)
         SVC->>DB: COMMIT
         SVC-->>GW: appointment created
         SVC-->>EVT: emit('AppointmentCreated', appointment)
@@ -596,6 +604,7 @@ sequenceDiagram
 - Sinh `appointmentCode` (dạng `APT-YYYYMMDD-XXXXX`) trong cùng transaction để tránh trùng dưới concurrency.
 - Kiểm tra real-time `shift.endTime` cho ngày hiện tại — không cho đặt lịch ca đã qua giờ.
 - Đếm appointment phải loại trừ `CANCELLED` và `NO_SHOW` để không tính nhầm.
+- Trạng thái khởi tạo của Appointment là `WAITING` (theo `AppointmentStateMachine` thực tế). State machine: `WAITING → CHECKED_IN → IN_PROGRESS → COMPLETED`, với các nhánh phụ `→ CANCELLED` và `→ NO_SHOW` từ `WAITING` hoặc `CHECKED_IN`.
 
 ---
 
@@ -797,7 +806,7 @@ sequenceDiagram
     participant NOT as Notification
 
     CRON->>JOB: Trigger at scheduled time
-    JOB->>DB: SELECT a.* FROM Appointment a<br/>JOIN DoctorShift ds ON a.doctorShiftId = ds.id<br/>JOIN Shift s ON ds.shiftId = s.id<br/>WHERE a.status = 'SCHEDULED'<br/>AND CONCAT(ds.workDate, ' ', s.endTime) < NOW()
+    JOB->>DB: SELECT a.* FROM Appointment a<br/>JOIN DoctorShift ds ON a.doctorShiftId = ds.id<br/>JOIN Shift s ON ds.shiftId = s.id<br/>WHERE a.status IN ('WAITING', 'CHECKED_IN')<br/>AND CONCAT(ds.workDate, ' ', s.endTime) < NOW()
 
     loop for each candidate
         JOB->>SVC: transition(appointmentId, 'NO_SHOW')
@@ -838,7 +847,7 @@ sequenceDiagram
     GW->>VSVC: checkIn(appointmentId)
     VSVC->>DB: BEGIN TRANSACTION
     VSVC->>DB: SELECT * FROM Appointment WHERE id=? FOR UPDATE
-    VSVC->>VSVC: AppointmentStateMachine: SCHEDULED → CHECKED_IN
+    VSVC->>VSVC: AppointmentStateMachine: WAITING → CHECKED_IN
     VSVC->>DB: UPDATE Appointment SET status='CHECKED_IN'
     VSVC->>DB: INSERT INTO Visit (appointmentId, patientId, doctorId, checkInTime=NOW, status='IN_PROGRESS')
     VSVC->>DB: COMMIT
@@ -873,6 +882,7 @@ sequenceDiagram
     VSVC->>DB: BEGIN TRANSACTION
     VSVC->>VSVC: VisitStateMachine: IN_PROGRESS → COMPLETED
     VSVC->>DB: UPDATE Visit SET status='COMPLETED', checkOutTime=NOW
+    VSVC->>VSVC: AppointmentStateMachine: CHECKED_IN → IN_PROGRESS → COMPLETED
     VSVC->>DB: UPDATE Appointment SET status='COMPLETED'
     VSVC->>DB: COMMIT
     VSVC-->>GW: visit
@@ -900,11 +910,10 @@ graph TB
         LB["Reverse Proxy / LB<br/>(Nginx)<br/>HTTPS · trust proxy"]
     end
 
-    subgraph AppTier["Application Tier (stateless)"]
-        API1["Backend API #1<br/>Node.js + Express"]
-        API2["Backend API #2"]
-        APIN["Backend API #N"]
-        SCH["Scheduler<br/>(leader, 1 instance)<br/>node-cron jobs"]
+    subgraph AppTier["Application Tier"]
+        API1["Backend API #1<br/>Node.js + Express<br/>+ in-process scheduler*"]
+        API2["Backend API #2<br/>+ in-process scheduler*"]
+        APIN["Backend API #N<br/>+ in-process scheduler*"]
     end
 
     subgraph DataTier["Data Tier"]
@@ -934,11 +943,11 @@ graph TB
     API1 & API2 & APIN --> OBJ
     API1 & API2 & APIN --> SMTP
     API1 & API2 & APIN --> GOA
-    SCH --> MYSQLP
-    SCH --> REDIS
     API1 & API2 & APIN -.logs.-> LOG
     API1 & API2 & APIN -.metrics.-> MON
 ```
+
+> *Ghi chú scheduler:* Trong code hiện tại, `initializeScheduler()` chạy trong **mọi** instance backend. Khi triển khai single-instance (kịch bản A) thì không vấn đề. Khi scale ≥ 2 instance, cần thêm cơ chế leader election để tránh trùng job — xem mục *Known Limitations*.
 
 **Lưu trữ:**
 - Dữ liệu nghiệp vụ chính trên **MySQL** (qua Sequelize migration version-controlled).
@@ -952,10 +961,12 @@ graph TB
 | CDN | Cloudflare (tùy chọn) | Phân phối frontend static với độ trễ thấp, chặn DDoS / bot. |
 | Reverse Proxy / Load Balancer | Nginx (on-prem) hoặc AWS ALB / GCP Cloud LB (cloud) | HTTPS termination, định tuyến `/` → frontend, `/api/*` → backend, load balancing N instance. |
 | Frontend hosting | Nginx serve static (kịch bản A) hoặc S3 + CloudFront / Firebase Hosting (kịch bản B) | Phục vụ build output của Vite. |
-| Backend API | Node.js + Express 5 + TypeScript, container hoá bằng Docker | Xử lý toàn bộ API nghiệp vụ. Chạy N instance stateless. |
-| Scheduler | Node.js process với `node-cron`, leader instance | Auto-no-show (mỗi 30 phút), expiry check, schedule generation, attendance. |
+| Backend API | Node.js + Express 5 + TypeScript, container hoá bằng Docker | Xử lý toàn bộ API nghiệp vụ. Chạy N instance — stateless cho dữ liệu persistent (đã ngoài tiến trình), còn 2 trạng thái in-process cần đồng bộ khi scale (xem *Known Limitations*). |
+| Scheduler | `node-cron` chạy in-process trong backend API | Auto-no-show (mỗi 30 phút), attendance jobs. **Hiện chạy ở mọi instance** — cần leader election khi scale. |
 | Cơ sở dữ liệu chính | MySQL 8 (qua Sequelize ORM) | Lưu toàn bộ dữ liệu nghiệp vụ. Triển khai primary + replica nếu cần read scaling. |
-| In-memory store | Redis (ioredis) | Token blacklist, OTP, cache GET, rate limit counter, dữ liệu phù du. |
+| Token blacklist & OTP store | Redis (ioredis) | Token revocation list với TTL bằng remaining lifetime; OTP đăng ký / reset mật khẩu với TTL 5 phút. **Đã ngoài tiến trình, sẵn sàng cho scale.** |
+| Cache GET (response) | In-memory `Map` trong tiến trình backend | Cache response GET cho danh mục read-heavy với TTL 5 phút. **Hiện in-process — mỗi instance có cache riêng khi scale.** |
+| Rate limit counter | In-memory mặc định của `express-rate-limit` | Đếm request / IP trong cửa sổ 15 phút. **Hiện in-process — cần `rate-limit-redis` khi scale ≥ 2 instance.** |
 | File storage | Local file system (kịch bản A) hoặc S3 / GCS (kịch bản B) | Avatar người dùng, ảnh triệu chứng. |
 | Email | SMTP server (Gmail SMTP, AWS SES, hoặc on-prem) | OTP, email confirmation. |
 | OAuth provider | Google OAuth 2.0 | Đăng nhập bằng Google. |
@@ -1085,10 +1096,11 @@ graph TB
 
 ### Mở rộng ngang (Horizontal Scaling)
 
-- **Backend API tier**: deploy ≥ 2 instance sau load balancer. Tầng API hoàn toàn stateless — không có session in-memory. Auto-scaling theo CPU / memory threshold qua Docker Swarm / Kubernetes HPA.
-- **Scheduler**: chỉ một instance giữ vai trò leader (qua biến môi trường `ENABLE_SCHEDULER=true`). Khi mở rộng, dùng cờ này hoặc leader election (Redis-based) để tránh trùng job.
-- **Token blacklist trên Redis**: khi scale N instance, blacklist phải nằm trên Redis dùng chung (đã sẵn sàng từ thiết kế).
-- **Rate limit counter trên Redis**: chuyển từ in-memory sang Redis store (đổi config `express-rate-limit`) khi scale ≥ 2 instance.
+- **Backend API tier**: deploy ≥ 2 instance sau load balancer. Tầng API về cơ bản stateless cho dữ liệu persistent (đã chuyển sang DB / Redis), nhưng còn 2 trạng thái in-process cần xử lý khi scale (xem *Known Limitations*).
+- **Token blacklist trên Redis**: ✅ **đã sẵn sàng từ thiết kế** — `TokenBlacklistService` đã đặt trên Redis dùng chung; không cần đổi gì khi scale.
+- **Scheduler**: hiện chạy ở mọi instance qua `initializeScheduler()` trong `server.ts`. Khi mở rộng ≥ 2 instance, **cần** một trong hai cách: (a) thêm env flag `ENABLE_SCHEDULER=true` chỉ ở instance leader, hoặc (b) Redis-based distributed lock cho từng job.
+- **Rate limit counter**: hiện dùng `express-rate-limit` store in-memory mặc định. Khi scale, **cần** thêm package `rate-limit-redis` để counter chia sẻ giữa các instance — nếu không, mỗi instance đếm riêng và ngưỡng thực tế = N × ngưỡng cấu hình.
+- **Cache GET middleware**: hiện dùng `Map` in-process. Khi scale, **cần** chuyển sang Redis hoặc chấp nhận cache không nhất quán giữa các instance (mỗi instance có cache riêng, TTL ngắn nên ảnh hưởng có thể chấp nhận).
 - **MySQL replica**: cấu hình primary + replica. Đọc-nặng (báo cáo, dashboard) route sang replica. Sequelize hỗ trợ `read` / `write` connection riêng.
 
 ### Mở rộng dọc (Vertical Scaling)
@@ -1133,6 +1145,107 @@ Cấu trúc package-by-feature hiện tại sẵn sàng để tách thành micro
 | Maintenance mode bật nhầm | Admin bật bảo trì → user thường bị 503. | Trung bình | Có confirmation dialog. Audit log cho mọi thay đổi cờ. Thông báo qua banner. | Tắt cờ qua API admin hoặc qua DB. |
 | Thiếu biến môi trường khi deploy | Ứng dụng khởi động được nhưng lỗi runtime (JWT secret rỗng, DB password sai). | Cao | `env.validation` validate biến môi trường khi khởi động, từ chối khởi động nếu thiếu biến bắt buộc. | Container không start → rollback deployment. Kiểm tra env config. |
 | Không có người trực sự cố ngoài giờ | Sự cố xảy ra ngoài giờ làm việc → recovery chậm. | Trung bình | Monitoring + alert qua Grafana / PagerDuty. Rotation on-call cho team DevOps. Runbook chi tiết cho các incident phổ biến. | Báo on-call qua alert. Theo runbook. |
+
+---
+
+---
+
+# 9. Known Limitations và Future Work
+
+Phần này ghi lại các hạn chế hiện tại của bản triển khai và lộ trình mở rộng. Trong kịch bản triển khai **single-instance** (Kịch bản A — on-prem 1 server), các hạn chế dưới đây không gây vấn đề. Chúng chỉ trở thành blocker khi mở rộng sang **multi-instance** (Kịch bản B — cloud N instance).
+
+## 9.1. In-process scheduler chạy ở mọi instance
+
+**Trạng thái hiện tại:** `initializeScheduler()` được gọi trực tiếp trong `server.ts` cho mọi backend instance. Mỗi instance đều khởi tạo cron job auto-no-show và attendance jobs.
+
+**Hệ quả khi scale ≥ 2 instance:**
+- Job auto-no-show chạy N lần mỗi chu kỳ → một appointment có thể bị transition `→ NO_SHOW` N lần, `noShowCount` của bệnh nhân bị tăng nhân lên (mặc dù state machine sẽ chặn transition lại từ NO_SHOW nên rủi ro chính là race condition trong vài mili-giây đầu).
+- Audit log của job bị trùng lặp.
+
+**Lộ trình:** Thêm env flag `ENABLE_SCHEDULER` (mặc định `false`) và bao quanh `initializeScheduler()` bằng điều kiện:
+
+```typescript
+if (process.env.ENABLE_SCHEDULER === 'true') {
+  initializeScheduler();
+}
+```
+
+Trong deployment, set `ENABLE_SCHEDULER=true` cho đúng một instance được chọn làm leader. Hoặc nâng cấp lên Redis-based distributed lock cho từng job (dùng package `redlock`).
+
+## 9.2. Rate limit counter in-process
+
+**Trạng thái hiện tại:** `express-rate-limit` dùng MemoryStore mặc định trong `app.ts`. Counter `windowMs` và số request đếm trong RAM của từng tiến trình.
+
+**Hệ quả khi scale ≥ 2 instance:**
+- Một client có thể được đếm riêng ở mỗi instance — ngưỡng thực tế ≈ N × `RATE_LIMIT_MAX_REQUESTS`.
+- Tấn công brute-force vào endpoint xác thực có thể vượt ngưỡng nếu load balancer phân phối đều giữa instance.
+
+**Lộ trình:** Cài thêm `rate-limit-redis` và đổi cấu hình:
+
+```typescript
+import RedisStore from "rate-limit-redis";
+import { redisClient } from "./config/redis.config";
+
+const limiter = rateLimit({
+  windowMs,
+  max,
+  store: new RedisStore({
+    sendCommand: (...args) => redisClient.call(...args),
+  }),
+});
+```
+
+## 9.3. Cache middleware in-process
+
+**Trạng thái hiện tại:** `cache.middlewares.ts` dùng `Map<string, CacheEntry>` trong tiến trình; cache key gồm `{userId}:{path}:{query}`.
+
+**Hệ quả khi scale ≥ 2 instance:**
+- Mỗi instance có cache riêng — không nhất quán giữa các instance.
+- Khi service nghiệp vụ gọi `clearCache(pattern)` sau một mutation, chỉ instance chạy mutation đó xóa cache; các instance khác vẫn trả dữ liệu cũ cho đến hết TTL (mặc định 5 phút).
+
+**Lộ trình (theo độ ưu tiên):**
+
+- **Option A — chấp nhận**: TTL ngắn 5 phút nên độ lệch tối đa 5 phút; với data read-heavy như danh mục thuốc / chuyên khoa thì có thể chấp nhận. Không làm gì.
+- **Option B — chuyển sang Redis**: viết lại `cacheMiddleware` để đọc/ghi cache trên Redis với cùng key pattern. Khi đó `clearCache` cũng phải gọi Redis (`SCAN` + `DEL`).
+- **Option C — pub/sub invalidation**: giữ cache in-process nhưng phát event qua Redis Pub/Sub khi cần clear, các instance subscribe để xóa cache local.
+
+## 9.4. Pagination chưa bắt buộc đồng đều
+
+**Trạng thái hiện tại:** SAD nói "phân trang bắt buộc cho mọi API danh sách" — đây là *design intent*. Trong code, một số endpoint danh sách (đặc biệt danh mục nhỏ như Specialty, Role, Permission) trả về toàn bộ không phân trang.
+
+**Hệ quả:** Với danh mục nhỏ (< 100 bản ghi) thì không vấn đề. Khi danh mục lớn (User, Patient, Appointment, Visit, AuditLog) tăng nhiều năm, các endpoint chưa phân trang có thể chậm.
+
+**Lộ trình:** Audit các endpoint danh sách qua Postman collection / OpenAPI spec, đảm bảo mọi endpoint trên bảng tăng trưởng đều có `?page=&limit=`. Frontend phải hỗ trợ infinite scroll hoặc pagination control.
+
+## 9.5. Cổng thanh toán online chưa nối thực tế
+
+**Trạng thái hiện tại:** Finance module có cấu trúc `Payment` với enum `PaymentMethod` sẵn sàng cho VNPay / MoMo, nhưng thực tế chỉ luồng tiền mặt được sử dụng.
+
+**Lộ trình:** Khi cần online payment, thêm:
+- Adapter cho từng cổng (VNPay, MoMo, ZaloPay).
+- Endpoint webhook `/api/payments/webhook/:provider` với chữ ký HMAC verification.
+- Idempotency key cho webhook để tránh xử lý trùng.
+
+## 9.6. Triển khai single-region
+
+**Trạng thái hiện tại:** Hệ thống thiết kế cho một region duy nhất (on-prem tại phòng khám hoặc cloud một region).
+
+**Lộ trình nếu mở rộng chuỗi phòng khám đa địa điểm:**
+- Multi-region active-passive hoặc active-active.
+- DB replication cross-region.
+- Cache warming cho region mới.
+- Cân nhắc tách microservice cho domain có workload lớn (Reporting, Notification).
+
+## 9.7. Bảng tóm tắt mức độ ưu tiên
+
+| Limitation | Ảnh hưởng khi single-instance | Ảnh hưởng khi multi-instance | Mức ưu tiên fix |
+| --- | --- | --- | --- |
+| 9.1 Scheduler ở mọi instance | Không vấn đề | **Job trùng, audit log nhân đôi** | Cao — fix ngay khi quyết định scale |
+| 9.2 Rate limit in-process | Không vấn đề | **Ngưỡng thực tế = N × cấu hình** | Cao — fix ngay khi quyết định scale |
+| 9.3 Cache in-process | Không vấn đề | Cache không nhất quán (TTL 5 phút) | Trung bình — có thể chấp nhận |
+| 9.4 Pagination chưa đồng đều | Có thể chậm sau 2–3 năm | Tương tự | Trung bình — fix theo bảng tăng trưởng |
+| 9.5 Payment online chưa nối | Không vấn đề | Không vấn đề | Thấp — chỉ khi business yêu cầu |
+| 9.6 Single-region | Không vấn đề | Không vấn đề | Thấp — chỉ khi mở chuỗi |
 
 ---
 
