@@ -367,6 +367,7 @@ export default function ProfilePage({ role }: ProfilePageProps) {
                         <div className="relative">
                           <UserIcon size={18} className="absolute left-4 top-3.5 text-gray-400 group-focus-within:text-indigo-600 transition-colors" />
                           <input
+                            id="fullName"
                             type="text"
                             value={formData.fullName}
                             onChange={(e) => setFormData({ ...formData, fullName: e.target.value })}
@@ -440,6 +441,7 @@ export default function ProfilePage({ role }: ProfilePageProps) {
                         <div className="relative">
                           <Phone size={18} className="absolute left-4 top-3.5 text-gray-400 group-focus-within:text-indigo-600 transition-colors" />
                          <input
+                            id="phone"
                             type="tel"
                             value={formData.phone}
                             onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
@@ -460,6 +462,7 @@ export default function ProfilePage({ role }: ProfilePageProps) {
                           <div className="relative">
                             <MapPin size={18} className="absolute left-4 top-3.5 text-gray-400 group-focus-within:text-indigo-600 transition-colors" />
                             <input
+                              id="address"
                               type="text"
                               value={formData.address}
                               onChange={(e) => setFormData({ ...formData, address: e.target.value })}
@@ -629,6 +632,7 @@ export default function ProfilePage({ role }: ProfilePageProps) {
                       <div className="relative">
                         <Lock size={18} className="absolute left-4 top-3.5 text-gray-400 group-focus-within:text-orange-500 transition-colors" />
                         <input
+                          id="currentPassword"
                           type="password"
                           value={passwordData.currentPassword}
                           onChange={(e) => setPasswordData({ ...passwordData, currentPassword: e.target.value })}
@@ -643,6 +647,7 @@ export default function ProfilePage({ role }: ProfilePageProps) {
                       <div className="relative">
                         <Lock size={18} className="absolute left-4 top-3.5 text-gray-400 group-focus-within:text-orange-500 transition-colors" />
                         <input
+                          id="newPassword"
                           type="password"
                           value={passwordData.newPassword}
                           onChange={(e) => setPasswordData({ ...passwordData, newPassword: e.target.value })}
@@ -657,6 +662,7 @@ export default function ProfilePage({ role }: ProfilePageProps) {
                        <div className="relative">
                         <CheckCircle size={18} className="absolute left-4 top-3.5 text-gray-400 group-focus-within:text-orange-500 transition-colors" />
                         <input
+                          id="confirmPassword"
                           type="password"
                           value={confirmPassword}
                           onChange={(e) => setConfirmPassword(e.target.value)}

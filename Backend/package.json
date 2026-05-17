@@ -55,6 +55,7 @@
     "passport-google-oauth20": "^2.0.0",
     "pdfkit": "^0.17.2",
     "pg": "^8.16.3",
+    "selenium-webdriver": "^4.44.0",
     "sequelize": "^6.37.7",
     "winston": "^3.19.0"
   },

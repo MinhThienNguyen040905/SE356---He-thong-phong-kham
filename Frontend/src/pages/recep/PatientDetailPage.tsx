@@ -87,7 +87,13 @@ export default function RecepPatientDetail() {
       if (!id) return
       try {
         setIsLoading(true)
-        const data = await getPatientById(Number(id))
+        const patientId = Number(id)
+        if (isNaN(patientId)) {
+          toast.error("ID bệnh nhân không hợp lệ")
+          setIsLoading(false)
+          return
+        }
+        const data = await getPatientById(patientId)
         setPatient(data)
         
         await fetchMedicalHistory()

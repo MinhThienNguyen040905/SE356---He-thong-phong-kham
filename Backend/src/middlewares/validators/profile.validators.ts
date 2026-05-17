@@ -14,6 +14,16 @@ export const validateUpdateProfile = [
     .isString()
     .withMessage("Avatar must be a valid string"),
 
+  body("phone")
+    .optional({ checkFalsy: true })
+    .isMobilePhone("vi-VN")
+    .withMessage("Số điện thoại không hợp lệ"),
+
+  body("profiles.*.value")
+    .if(body("profiles.*.type").equals("phone"))
+    .isMobilePhone("vi-VN")
+    .withMessage("Số điện thoại không hợp lệ"),
+
   validate,
 ];
 
