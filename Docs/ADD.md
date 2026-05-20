@@ -34,7 +34,7 @@
 
 ## 1. Design Constraints
 
-- **Security**: Xác thực dùng token stateless kèm khả năng thu hồi ngay; phân quyền RBAC theo vai trò + permission chi tiết theo domain; toàn bộ input validate và sanitize ở biên; mật khẩu hash bằng thuật toán adaptive (kèm salt); bí mật cấu hình đọc từ secret store / biến môi trường và validate khi khởi động.
+- **Security**: Xác thực dùng token stateless kèm khả năng thu hồi ngay; phân quyền RBAC hai tầng — kiểm vai trò ở route layer (mặc định) và mô hình Role × Permission ở Database layer sẵn sàng để kích hoạt khi cần quyền chi tiết hơn; toàn bộ input validate và sanitize ở biên; mật khẩu hash bằng thuật toán adaptive (kèm salt); bí mật cấu hình đọc từ secret store / biến môi trường và validate khi khởi động.
 - **Performance**: ≥ 95% request danh sách / tìm kiếm phản hồi dưới 500 ms (P95); dashboard tổng hợp ≤ 1.5 s; báo cáo dải tháng < 5 s.
 - **Data Integrity**: Luồng đặt lịch khám và giao dịch tài chính nằm trong transaction kèm row-level lock; mọi chuyển trạng thái nghiệp vụ đi qua state machine tập trung; thao tác mutating trên dữ liệu nhạy cảm sinh audit log.
 - **Availability**: Mục tiêu uptime nghiệp vụ cốt lõi ≥ 99%; có chế độ bảo trì runtime; suy giảm có kiểm soát khi phụ thuộc ngoài lỗi.
@@ -60,16 +60,16 @@
 | Response | Dùng token stateless với thời hạn ngắn; mọi request đi qua một bước kiểm tra danh sách thu hồi trước khi xác thực chữ ký; sự kiện đăng xuất / đổi mật khẩu / khóa tài khoản thêm token vào danh sách thu hồi với TTL bằng thời hạn còn lại; hỗ trợ ba kênh đăng nhập (mật khẩu, OAuth bên thứ ba, OTP qua email). |
 | Response measure | Token bị thu hồi không còn truy cập được sau ≤ 1 giây trên toàn hệ thống. Trung bình thời gian xác thực token < 100 ms. ≥ 99.9% truy cập trái phép bị từ chối và log. |
 
-#### 2.1.2. ASR-SEC-02 — RBAC with Fine-grained Permissions
+#### 2.1.2. ASR-SEC-02 — Role-Based Access Control (with extensible fine-grained model)
 
 | Element | Statement |
 | --- | --- |
 | Stimulus | Người dùng có vai trò bất kỳ gọi một endpoint nghiệp vụ. |
 | Stimulus source | Bệnh nhân, Bác sĩ, Lễ tân, Admin. |
-| Environment | Vận hành bình thường; ma trận phân quyền có thể được admin cập nhật theo thời gian. |
+| Environment | Vận hành bình thường; ma trận phân quyền có thể được admin mở rộng theo thời gian. |
 | Artifact | Authorization middleware ở biên, mô hình quan hệ Role–Permission trong cơ sở dữ liệu. |
-| Response | Hệ thống có 4 vai trò chính (Admin, Doctor, Receptionist, Patient). Mỗi vai trò gắn với một tập permission khai báo theo domain. Một bước kiểm tra quyền tập trung chạy trước khi vào lớp nghiệp vụ. Ma trận quyền cấu hình ở dữ liệu, không hard-code; thay đổi có hiệu lực ở phiên kế tiếp mà không cần triển khai lại. |
-| Response measure | 100% endpoint mutating được bao phủ phân quyền. Thay đổi cấu hình quyền có hiệu lực ngay phiên kế tiếp. 0 hành động vượt quyền lọt qua trong test phân quyền. |
+| Response | Phân quyền triển khai theo **hai tầng**: (1) **Tầng vai trò (coarse-grained)** — kiểm tra vai trò của người gọi (Admin, Doctor, Receptionist, Patient) trước khi vào lớp nghiệp vụ; đây là tầng được áp dụng mặc định cho mọi endpoint nghiệp vụ vì với 4 vai trò cố định, kiểm vai trò đã đủ phân tách ngữ cảnh truy cập. (2) **Tầng quyền chi tiết (fine-grained, sẵn sàng kích hoạt)** — mô hình quan hệ Role × Permission ở Database layer cho phép gán từng quyền theo domain (ví dụ "tạo hóa đơn", "hoàn tiền") cho từng vai trò; tầng này được giữ sẵn để khi nhu cầu phân quyền tinh hơn xuất hiện (thêm vai trò mới như Pharmacist, hay tách quyền nội bộ trong Admin) chỉ cần thay middleware ở tầng route — không phải đổi mô hình dữ liệu hay logic nghiệp vụ. |
+| Response measure | 100% endpoint mutating đi qua bước kiểm tra phân quyền trước khi vào nghiệp vụ. 0 hành động vượt quyền lọt qua trong test phân quyền. Bổ sung quyền chi tiết mới cho một vai trò có hiệu lực ở phiên kế tiếp mà không cần triển khai lại. |
 
 #### 2.1.3. ASR-SEC-03 — Patient Data Self-scope Enforcement
 
@@ -850,7 +850,9 @@ flowchart LR
     AUDIT --> RES([2xx response])
 ```
 
-#### 3.6.2. RBAC model (ASR-SEC-02)
+#### 3.6.2. RBAC model — hai tầng phân quyền (ASR-SEC-02)
+
+Mô hình dữ liệu hỗ trợ cả tầng coarse-grained (vai trò) và tầng fine-grained (quyền theo domain). Tầng vai trò là tầng *được kích hoạt mặc định* ở route layer; tầng quyền chi tiết được giữ sẵn dưới CSDL để kích hoạt khi nhu cầu phân quyền tinh hơn xuất hiện.
 
 ```mermaid
 erDiagram
@@ -879,6 +881,8 @@ erDiagram
     }
 ```
 
+**Đường nâng cấp:** khi cần phân quyền tinh hơn (ví dụ tách quyền nội bộ trong Admin, hoặc thêm vai trò Pharmacist), middleware ở route layer chuyển từ kiểm tra vai trò sang kiểm tra quyền chi tiết — đọc Role × Permission qua bảng RolePermission. Lớp nghiệp vụ không phải đổi.
+
 #### 3.6.3. Token lifecycle (ASR-SEC-01)
 
 ```mermaid
@@ -900,7 +904,7 @@ stateDiagram-v2
 | Transport | HTTPS bắt buộc ở reverse proxy; bảo vệ tầng nội bộ giữa backend ↔ store ngoài | ASR-SEC-05 |
 | Edge | Security headers, CORS allow-list, rate limit theo IP/user, giới hạn kích thước body | ASR-SEC-04, ASR-PERF-02 |
 | Identity | Token stateless + danh sách thu hồi ngoài tiến trình; hash adaptive + salt; OTP qua email; OAuth provider ngoài | ASR-SEC-01, ASR-SEC-05 |
-| Authorization | RBAC (Role × Permission) + self-scope cho bệnh nhân | ASR-SEC-02, ASR-SEC-03 |
+| Authorization | RBAC hai tầng: vai trò ở route (mặc định) + Role × Permission sẵn sàng kích hoạt; self-scope cho bệnh nhân | ASR-SEC-02, ASR-SEC-03 |
 | Input | Schema validation + HTML sanitization ở biên | ASR-SEC-04 |
 | State change | Centralized state machine cho lifecycle nghiệp vụ | ASR-DI-03 |
 | Observability | Audit log đầy đủ giá trị trước / sau cho mọi mutating action | ASR-DI-04, ASR-MAN-01 |

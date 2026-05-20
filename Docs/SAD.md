@@ -348,7 +348,7 @@ graph TB
 
 - **Chức năng chính**: CRUD `User`, `Employee`, `Doctor`. Quản lý ma trận Role–Permission qua `Role`, `Permission`, `RolePermission`. Upload avatar.
 - **Giao tiếp với**: API Gateway, Authentication (user info), Doctor module (tạo Doctor từ Employee), file storage (avatar).
-- **Lưu ý triển khai**: 4 vai trò hard-code trong enum `RoleCode` (ADMIN=1, RECEPTIONIST=2, PATIENT=3, DOCTOR=4) để có hằng số kiểu mạnh. Permission cấu hình qua dữ liệu trong bảng `Permission` + `RolePermission`. Middleware `requirePermission(name)` đọc role từ JWT, join sang `Permission` để kiểm tra.
+- **Lưu ý triển khai**: 4 vai trò hard-code trong enum `RoleCode` (ADMIN=1, RECEPTIONIST=2, PATIENT=3, DOCTOR=4) để có hằng số kiểu mạnh. Phân quyền ở route layer hiện dùng middleware `requireRole(...allowedRoles)` (coarse-grained). Mô hình Permission + RolePermission ở DB đã sẵn sàng cùng với middleware `requirePermission(name)` (đọc role từ JWT, join sang `Permission`) — giữ ở trạng thái ready-but-not-active để kích hoạt khi cần fine-grained.
 
 #### Patient Module
 
@@ -1004,15 +1004,16 @@ graph TB
 - **Stimulus**: Người dùng đã xác thực gọi một endpoint nghiệp vụ.
 - **Stimulus source**: Frontend với JWT Bearer token.
 - **Environment**: Sau bước xác thực.
-- **Artifact**: Middleware `requirePermission`, `requireAnyPermission`, `requireSelfPatient`; bảng `Role`, `Permission`, `RolePermission`.
+- **Artifact**: Middleware phân quyền theo vai trò `requireRole(...)` (đang dùng); middleware phân quyền chi tiết `requirePermission`, `requireAnyPermission`, `requireAllPermissions` (sẵn sàng kích hoạt); middleware `requireSelfPatient`; bảng `Role`, `Permission`, `RolePermission`.
 - **Response**:
-  - Hệ thống dùng **Role-Based Access Control (RBAC)** với 4 vai trò chính: `ADMIN`, `RECEPTIONIST`, `PATIENT`, `DOCTOR`. Định nghĩa hằng số trong `RoleCode` enum.
-  - Permission chi tiết theo từng endpoint, ví dụ `patients.create`, `appointments.cancel`, `invoices.refund`, được lưu trong bảng `Permission`. Liên kết Role ↔ Permission qua `RolePermission` (nhiều–nhiều).
-  - Middleware `requirePermission(name)` đọc `roleId` từ JWT, join sang `Permission` để kiểm tra. Trả 403 nếu thiếu quyền.
-  - Đối với role `PATIENT`, middleware `requireSelfPatient` ép điều kiện `where: { patientId: req.user.patientId }` vào truy vấn để bệnh nhân chỉ thấy dữ liệu của chính họ.
-  - Thay đổi cấu hình quyền (qua API admin) có hiệu lực ngay phiên kế tiếp mà không cần redeploy.
+  - Hệ thống dùng **Role-Based Access Control (RBAC) hai tầng**:
+    - **Tầng đang được kích hoạt — Role-based (coarse-grained):** 4 vai trò chính `ADMIN`, `RECEPTIONIST`, `PATIENT`, `DOCTOR` định nghĩa hằng số trong `RoleCode` enum. Middleware `requireRole(...allowedRoles)` đọc `roleId` từ JWT, kiểm có nằm trong danh sách vai trò được phép, trả 403 `FORBIDDEN` nếu không. Đây là tầng được gắn ở mọi `*.routes.ts` cho các endpoint nghiệp vụ. Phù hợp với v1.0 vì 4 vai trò cố định đủ phân tách ngữ cảnh truy cập.
+    - **Tầng dự phòng — Permission-based (fine-grained):** Mô hình quan hệ Role × Permission đã sẵn ở Database layer (bảng `Permission` chứa các quyền theo domain như `patients.create`, `appointments.cancel`, `invoices.refund`; bảng `RolePermission` gán quyền cho vai trò). Middleware `requirePermission(name)`, `requireAnyPermission([...])`, `requireAllPermissions([...])` đã được implement và unit-test đầy đủ, đọc `roleId` từ JWT và join sang `Permission`. *Hiện chưa được gắn ở route nào* — chờ kích hoạt khi nhu cầu phân quyền tinh hơn xuất hiện.
+  - **Đường nâng cấp:** khi cần phân quyền chi tiết (ví dụ thêm vai trò Pharmacist, tách quyền nội bộ trong Admin), chỉ thay middleware ở route layer từ `requireRole(...)` sang `requirePermission(...)`. Mô hình dữ liệu, lớp nghiệp vụ và frontend không cần đổi.
+  - Đối với role `PATIENT`, middleware `requireSelfPatient` ép điều kiện scope theo `patientId` của chính người gọi để bệnh nhân chỉ thấy dữ liệu của mình.
+  - Thay đổi cấu hình Role × Permission (qua API admin) có hiệu lực ngay phiên kế tiếp mà không cần redeploy — chỉ phát huy tác dụng đầy đủ khi tầng fine-grained được kích hoạt.
 - **Response Measure**:
-  - 100% endpoint mutating được bảo vệ bởi `requirePermission`.
+  - 100% endpoint mutating đi qua bước kiểm tra phân quyền (`requireRole` ở tầng hiện tại) trước khi vào nghiệp vụ.
   - Thời gian kiểm tra quyền không thêm > 20 ms vào tổng độ trễ request.
   - 0 trường hợp rò rỉ dữ liệu chéo giữa các bệnh nhân trong test phân quyền.
 
@@ -1030,7 +1031,7 @@ graph TB
 - **Stimulus**: Lưu lượng đến `/api/*` từ client hoặc nguồn bên ngoài.
 - **Stimulus source**: Trình duyệt người dùng; client độc hại (brute-force, scanner); tích hợp bên thứ ba.
 - **Environment**: Vận hành bình thường.
-- **Artifact**: Pipeline middleware ở `app.ts` (helmet → CORS → rate limit → body parser → maintenance → auth → validate → sanitize → permission).
+- **Artifact**: Pipeline middleware ở `app.ts` (helmet → CORS → rate limit → body parser → sanitize → maintenance → auth → role check (`requireRole`) → validate → controller). Tầng `requirePermission` được giữ sẵn ở `permission.middlewares.ts` cho nhánh fine-grained.
 - **Response**:
   - **HTTPS bắt buộc** ở reverse proxy cho mọi traffic client–server.
   - **Helmet** đặt các security header chuẩn OWASP: `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Strict-Transport-Security`, etc.
