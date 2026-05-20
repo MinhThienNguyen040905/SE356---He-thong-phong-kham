@@ -9,6 +9,10 @@ if ((process.stderr as any)._handle) {
   (process.stderr as any)._handle.setBlocking(true);
 }
 
+import { validateEnv } from "./config/env.validation";
+
+validateEnv();
+
 import app from "./app";
 import { startAllMedicineJobs } from "./jobs/medicineExpiryCheck";
 import { setupScheduleGenerationCron } from "./jobs/scheduleGenerationCron";

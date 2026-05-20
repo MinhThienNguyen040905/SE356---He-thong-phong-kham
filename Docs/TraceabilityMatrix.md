@@ -19,14 +19,14 @@
 | # | ASR ID | ASR Name | UT | SRS UC | ADD § | SAD § | Code File(s) | Design Pattern(s) | Demo Scenario |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | **ASR-SEC-01** | Strong Authentication with Token Revocation | UT-SEC-01 | UC1, UC5, UC6 | 2.1.1 | 2.1.1, 4.2.3, 6.1 | [Backend/src/middlewares/auth.middlewares.ts](Backend/src/middlewares/auth.middlewares.ts), [Backend/src/config/redis.config.ts](Backend/src/config/redis.config.ts) (`TokenBlacklistService`), [Backend/src/modules/auth/auth.controller.ts](Backend/src/modules/auth/auth.controller.ts) | **Token Revocation List**, **Middleware Chain**, **Singleton** (Redis client) | Login → call protected API (200) → Logout → call same API immediately (401 TOKEN_REVOKED) trong < 1s |
-| 2 | **ASR-SEC-02** | RBAC with Fine-grained Permissions | UT-SEC-02 | UC8, plus all mutating UCs | 2.1.2 | 2.1.2, 6.2 | [Backend/src/middlewares/permission.middlewares.ts](Backend/src/middlewares/permission.middlewares.ts), [Backend/src/models/Role.ts](Backend/src/models/Role.ts), [Backend/src/models/Permission.ts](Backend/src/models/Permission.ts), [Backend/src/models/RolePermission.ts](Backend/src/models/RolePermission.ts), [Backend/src/constant/role.ts](Backend/src/constant/role.ts) | **RBAC**, **Middleware Chain**, **Declarative Authorization** | Login as Patient → gọi POST /api/employees (admin endpoint) → 403 PERMISSION_DENIED |
+| 2 | **ASR-SEC-02** | Role-Based Access Control (2 tầng: vai trò ở route + Permission sẵn sàng) | UT-SEC-02 | UC8, plus all mutating UCs | 2.1.2 | 2.1.2, 6.2 | **Tầng đang dùng:** [Backend/src/middlewares/roleCheck.middlewares.ts](Backend/src/middlewares/roleCheck.middlewares.ts) (`requireRole(...allowedRoles)`), được gắn ở từng `*.routes.ts` (ví dụ [employee.routes.ts](Backend/src/modules/user/employee.routes.ts) dòng 10-11 `router.use(verifyToken)` + `router.use(requireRole(RoleCode.ADMIN))`), [Backend/src/constant/role.ts](Backend/src/constant/role.ts). **Tầng dự phòng / mở rộng:** [Backend/src/middlewares/permission.middlewares.ts](Backend/src/middlewares/permission.middlewares.ts) (`requirePermission`, `requireAnyPermission`, `requireAllPermissions`), [Backend/src/models/Role.ts](Backend/src/models/Role.ts), [Backend/src/models/Permission.ts](Backend/src/models/Permission.ts), [Backend/src/models/RolePermission.ts](Backend/src/models/RolePermission.ts) — mô hình dữ liệu sẵn sàng, chưa kích hoạt ở route layer. | **RBAC (Role-Based)**, **Middleware Chain (Chain of Responsibility)**, **Higher-Order Function** (factory `requireRole(...)`), **Repository Pattern** (Role/Permission/RolePermission models) | Login as Patient → gọi `GET /api/employees` (admin-only endpoint) → 403 `FORBIDDEN`. Đổi sang token Admin cùng endpoint → 200 + danh sách nhân viên. |
 | 3 | **ASR-SEC-03** | Patient Data Self-scope Enforcement | UT-SEC-03 | UC7, UC11 (own only), patient-scoped GET endpoints | 2.1.3 | 2.1.3, 6.2 | [Backend/src/middlewares/requireSelfPatient.middlewares.ts](Backend/src/middlewares/requireSelfPatient.middlewares.ts), [Backend/src/middlewares/requireContext.middlewares.ts](Backend/src/middlewares/requireContext.middlewares.ts) | **Self-scope Guard**, **Context Resolver**, **Authorization Filter** | Login as Patient A → GET /api/appointments/{id-của-Patient-B} → 403 OUT_OF_SCOPE |
 | 4 | **ASR-SEC-04** | Input Validation and Boundary Defense | UT-SEC-04 | All UCs with input | 2.1.4 | 2.1.4, 6.3 | [Backend/src/app.ts](Backend/src/app.ts) (helmet, cors, rate limit setup), [Backend/src/middlewares/sanitize.middlewares.ts](Backend/src/middlewares/sanitize.middlewares.ts), [Backend/src/middlewares/validators/](Backend/src/middlewares/validators/) (express-validator schemas) | **Middleware Pipeline (Chain of Responsibility)**, **Decorator** (validator chains) | POST /api/visits với `symptoms: "<script>alert(1)</script>"` → kiểm tra DB lưu sanitized text |
 | 5 | **ASR-SEC-05** | Secure Credential and Secret Management | UT-SEC-05 | UC1, UC2, UC6 (password); deployment | 2.1.5 | 2.1.5, 6.1, 6.4 | [Backend/src/config/env.validation.ts](Backend/src/config/env.validation.ts), [Backend/src/utils/password.ts](Backend/src/utils/password.ts) (bcrypt wrapper) | **Configuration Externalization**, **Adaptive Hashing (bcrypt)**, **Fail-fast Bootstrap** | Xóa biến JWT_SECRET → npm run dev → backend từ chối khởi động với lỗi rõ |
 | 6 | **ASR-PERF-01** | Low-latency Reads for Lists, Search and Dashboard | UT-PERF-01 | All list/search UCs (UC9 doctor list, UC25 reports) | 2.2.1 | 2.2.1, 7.1 | [Backend/src/middlewares/cache.middlewares.ts](Backend/src/middlewares/cache.middlewares.ts), [Backend/migrations/20250103000001-add-performance-indexes.js](Backend/migrations/20250103000001-add-performance-indexes.js), [Backend/migrations/20250104000001-add-additional-performance-indexes.js](Backend/migrations/20250104000001-add-additional-performance-indexes.js) | **Cache-aside**, **Database Indexing**, **Pagination** | GET /api/appointments với 10k bản ghi → đo P95 < 500ms qua Postman runner |
 | 7 | **ASR-PERF-02** | Resource Protection Under Burst Traffic | UT-PERF-02 | UC1 (login brute-force) | 2.2.2 | 2.2.2, 6.3 | [Backend/src/app.ts](Backend/src/app.ts) (express-rate-limit config), [Backend/src/middlewares/rateLimit.middlewares.ts](Backend/src/middlewares/rateLimit.middlewares.ts) | **Rate Limiting**, **Throttling** | `for i in {1..50}; do curl POST /api/auth/login; done` → request thứ ~10+ trả 429 Too Many Requests |
 | 8 | **ASR-DI-01** | **Concurrent Booking Consistency** ⭐ | UT-DI-01 | UC9, UC10, UC12 | 2.3.1 | 2.3.1, 4.2.1 | [Backend/src/modules/appointment/appointment.service.ts](Backend/src/modules/appointment/appointment.service.ts) (`createAppointmentService`), [Backend/src/utils/stateMachine.ts](Backend/src/utils/stateMachine.ts) (`AppointmentStateMachine`), [Backend/src/utils/codeGenerator.ts](Backend/src/utils/codeGenerator.ts) (`generateAppointmentCode`) | **Transaction Script**, **Pessimistic Locking** (SELECT FOR UPDATE), **State Machine**, **Code Generator** | Seed DB: DoctorShift còn 1 slot. Chạy 2 request concurrent qua `xargs -P 2`. 1 thành công (201), 1 fail (409 SLOTS_FULL) |
-| 9 | **ASR-DI-02** | **Atomic Financial Operations** ⭐ | UT-DI-02 | UC18, UC19, UC20 | 2.3.2 | 2.3.2, 4.2.4 | [Backend/src/modules/finance/invoice.service.ts](Backend/src/modules/finance/invoice.service.ts) (`createInvoice`), [Backend/src/modules/inventory/medicine.service.ts](Backend/src/modules/inventory/medicine.service.ts) (dispense logic) | **Transaction Script**, **Conditional Update** (UPDATE ... WHERE stock >= qty), **State Machine** (VisitStateMachine) | Tạo invoice với medicine số lượng > stock → cả invoice + medicine export đều rollback, Visit.status không đổi |
+| 9 | **ASR-DI-02** | **Atomic Financial Operations** ⭐ | UT-DI-02 | UC15, UC18, UC19, UC20 | 2.3.2 | 2.3.2, 4.2.4 | [Backend/src/modules/appointment/prescription.service.ts](Backend/src/modules/appointment/prescription.service.ts) (`createPrescription`, `updatePrescription` — biên transaction kê đơn + xuất kho), [Backend/src/modules/finance/invoice.service.ts](Backend/src/modules/finance/invoice.service.ts) (`createInvoiceFromVisit` — biên transaction tạo hóa đơn từ snapshot), [Backend/src/utils/stateMachine.ts](Backend/src/utils/stateMachine.ts) (VisitStateMachine) | **Transaction Script** (2 biên tách biệt), **Pessimistic Locking** (Medicine row trong prescription transaction), **State Machine** (VisitStateMachine), **Snapshot Pattern** (PrescriptionDetail giữ unitPrice/quantity cho InvoiceItem đọc lại) | **(a)** Kê đơn với số lượng > stock → INSUFFICIENT_STOCK, Prescription + Medicine.quantity + MedicineExport đều rollback. **(b)** Đã có đơn thuốc, tạo hóa đơn 2 lần cho cùng visit → lần 2 báo INVOICE_ALREADY_EXISTS, không sinh hóa đơn trùng. |
 | 10 | **ASR-DI-03** | Explicit State Machine for Business Entities | UT-DI-03 | UC11, UC12, UC13, UC14, UC18 | 2.3.3 | 2.3.3, 2.2 (mô tả) | [Backend/src/utils/stateMachine.ts](Backend/src/utils/stateMachine.ts) (`AppointmentStateMachine`, `VisitStateMachine`, `InvoiceStateMachine`) | **State Machine Pattern**, **Strategy** (per entity type) | Cố gọi API chuyển CANCELLED → COMPLETED → throw `INVALID_APPOINTMENT_STATE_TRANSITION` |
 | 11 | **ASR-DI-04** | Comprehensive Audit Trail | UT-DI-04 | All mutating UCs | 2.3.4 | 2.3.4, 6.5 | [Backend/src/middlewares/auditLog.middlewares.ts](Backend/src/middlewares/auditLog.middlewares.ts), [Backend/src/modules/admin/auditLog.service.ts](Backend/src/modules/admin/auditLog.service.ts), [Backend/src/models/AuditLog.ts](Backend/src/models/AuditLog.ts) | **Interceptor**, **Decorator** (auditCreate/Update/Delete wrappers), **Async Write** | Update bệnh nhân → query GET /api/audit-logs?recordId={id} → thấy entry với oldValue/newValue |
 | 12 | **ASR-AVL-01** | Background Job Isolation | UT-AVL-01 | UC22 (cron schedule generation), auto-no-show | 2.4.1 | 2.4.1, 4.2.5 (sequence) | [Backend/src/jobs/scheduler.ts](Backend/src/jobs/scheduler.ts), [Backend/src/jobs/autoNoShow.job.ts](Backend/src/jobs/autoNoShow.job.ts), [Backend/src/jobs/attendance.job.ts](Backend/src/jobs/attendance.job.ts), [Backend/src/jobs/medicineExpiryCheck.ts](Backend/src/jobs/medicineExpiryCheck.ts), [Backend/src/jobs/scheduleGenerationCron.ts](Backend/src/jobs/scheduleGenerationCron.ts) | **Scheduler**, **Try-Catch Wrapper**, (đề xuất tương lai: **Leader Election**) | Inject lỗi vào auto-no-show job → log thấy "[Scheduler] Auto no-show job failed:" nhưng API vẫn 200 OK |
@@ -71,18 +71,24 @@
 
 ---
 
-### ⭐ ASR-DI-02 — Atomic Financial Operations (tạo hóa đơn)
+### ⭐ ASR-DI-02 — Atomic Financial Operations (kê đơn + tạo hóa đơn)
 
-**Câu hỏi mẫu:** *"Tại sao việc tạo hóa đơn phải atomic? Implement thế nào?"*
+**Câu hỏi mẫu:** *"Tại sao việc kê đơn và tạo hóa đơn phải atomic? Implement thế nào?"*
 
 **Key points:**
-- Vì 1 hóa đơn động tới nhiều bảng: Invoice + InvoiceItem + MedicineExport + Medicine.stock + Visit.status.
-- Nếu không atomic, một bước fail → dữ liệu mâu thuẫn (hóa đơn ghi 10 viên nhưng kho chỉ trừ 8).
-- Tactic: Tất cả nằm trong **một transaction**.
-- Conditional UPDATE `UPDATE Medicine SET stock = stock - qty WHERE stock >= qty` để chống race condition mà không cần explicit lock cho Medicine.
-- Code: [invoice.service.ts](Backend/src/modules/finance/invoice.service.ts) hàm createInvoice.
-- Pattern: Transaction Script + Conditional Update + State Machine (VisitStateMachine COMPLETED → INVOICED).
-- Demo: Inject lỗi giữa loop tạo InvoiceItem → kiểm DB thấy Invoice không tồn tại, Medicine.stock không thay đổi, Visit.status vẫn COMPLETED.
+- Hệ thống chia luồng tài chính thành **2 biên transaction** theo vai trò nghiệp vụ:
+  - **Biên (a) – Prescription transaction** (bác sĩ kê đơn): atomic giữa Prescription + PrescriptionDetail + Medicine.quantity (trừ kho) + MedicineExport + Visit.status. Đây mới là nơi "động vào tồn kho".
+  - **Biên (b) – Invoice transaction** (lễ tân tạo hóa đơn): atomic giữa Invoice + InvoiceItem cho phí khám + InvoiceItem cho từng PrescriptionDetail (đọc snapshot unitPrice/quantity từ đơn).
+- Lý do chia: đảm bảo bác sĩ không kê vượt tồn kho ngay tại thời điểm khám (không thể "kê rồi mai tính"); hóa đơn chỉ là chứng từ tổng hợp.
+- Tactic biên (a): `sequelize.transaction({ isolationLevel: READ_COMMITTED })` + `Medicine.findByPk({ lock: t.LOCK.UPDATE })` cho mỗi medicine item, rồi check `quantity >= qty` và trừ.
+- Tactic biên (b): `sequelize.transaction()` đọc Visit + Prescription + Details, check `existingInvoice` để chống tạo trùng, sinh `invoiceCode` trong transaction.
+- Pattern: Transaction Script (×2) + Pessimistic Locking (Medicine row) + State Machine (VisitStateMachine) + Snapshot Pattern (PrescriptionDetail giữ giá tại thời điểm kê).
+- Code:
+  - [prescription.service.ts](Backend/src/modules/appointment/prescription.service.ts) hàm `createPrescription` (biên a) và `updatePrescription` (sửa đơn = phục hồi kho cũ + trừ kho mới + xóa InvoiceItem cũ — vẫn trong 1 transaction).
+  - [invoice.service.ts](Backend/src/modules/finance/invoice.service.ts) hàm `createInvoiceFromVisit` (biên b).
+- Demo:
+  - **(a)** Kê đơn với medicine số lượng > stock → throw `INSUFFICIENT_STOCK_*`. Kiểm DB: Prescription không tồn tại, Medicine.quantity không đổi, không có MedicineExport mới.
+  - **(b)** Tạo hóa đơn 2 lần cho cùng `visitId` → lần 2 báo `Invoice already exists for this visit`, không sinh hóa đơn trùng.
 
 ---
 
@@ -101,18 +107,29 @@
 
 ---
 
-### ⭐ ASR-SEC-02 — RBAC with Fine-grained Permissions
+### ⭐ ASR-SEC-02 — Role-Based Access Control (2 tầng)
 
-**Câu hỏi mẫu:** *"Phân quyền như thế nào? Có ma trận không?"*
+**Câu hỏi mẫu:** *"Phân quyền như thế nào? Có ma trận không? Sao có file `permission.middlewares.ts` mà route không dùng?"*
 
 **Key points:**
-- 4 vai trò hard-code trong enum `RoleCode` (ADMIN=1, RECEPTIONIST=2, PATIENT=3, DOCTOR=4) để có hằng số kiểu mạnh.
-- Permission cấu hình ở dữ liệu (bảng Permission + RolePermission) — cho phép admin sửa quyền runtime mà không cần redeploy.
-- Middleware `requirePermission(name)` đọc roleId từ JWT, join Permission table.
-- Code: [permission.middlewares.ts](Backend/src/middlewares/permission.middlewares.ts), models Role/Permission/RolePermission.
-- Ma trận: xem SRS section 3.1.
-- Pattern: RBAC + Middleware Chain + Declarative Authorization.
-- Demo: Login as Patient → POST /api/employees → 403 PERMISSION_DENIED.
+
+- Hệ thống thiết kế phân quyền **hai tầng** để cân bằng giữa đơn giản hiện tại và mở rộng tương lai:
+  - **Tầng đang dùng — Coarse-grained (Role-based):**
+    - 4 vai trò hard-code trong enum `RoleCode` (ADMIN=1, RECEPTIONIST=2, PATIENT=3, DOCTOR=4) để có hằng số kiểu mạnh.
+    - Middleware `requireRole(...allowedRoles)` ở [roleCheck.middlewares.ts](Backend/src/middlewares/roleCheck.middlewares.ts) — đọc `roleId` từ JWT đã verify, kiểm có nằm trong danh sách cho phép không, sai trả 403 `FORBIDDEN`.
+    - Cách gắn: ở mỗi `*.routes.ts` dùng `router.use(verifyToken)` + `router.use(requireRole(RoleCode.X))` cho cả file, hoặc gắn từng route. Ví dụ [employee.routes.ts](Backend/src/modules/user/employee.routes.ts) chỉ Admin dùng được.
+    - **Vì sao chọn tầng này hiện tại:** với 4 vai trò cố định trong phạm vi v1.0, kiểm tra vai trò đã đủ phân tách ngữ cảnh truy cập; đơn giản, dễ đọc, ít overhead query DB.
+  - **Tầng dự phòng — Fine-grained (Permission-based):**
+    - Mô hình quan hệ Role × Permission (bảng `Role`, `Permission`, `RolePermission`) đã sẵn ở Database layer.
+    - Middleware `requirePermission(name)`, `requireAnyPermission([...])`, `requireAllPermissions([...])` ở [permission.middlewares.ts](Backend/src/middlewares/permission.middlewares.ts) đã được implement đầy đủ và unit-test.
+    - **Hiện chưa được route nào gắn** — chờ kích hoạt khi nhu cầu phân quyền tinh hơn xuất hiện (thêm vai trò Pharmacist, tách quyền nội bộ trong Admin, v.v.).
+- **Đường nâng cấp:** khi cần fine-grained, chỉ thay middleware ở route layer từ `requireRole(...)` sang `requirePermission(...)`. Mô hình dữ liệu không đổi, lớp nghiệp vụ không đổi.
+- Ma trận vai trò ↔ chức năng: xem [BRD.md](Docs/BRD.md) §2.5 Security Matrix.
+- Pattern: RBAC (Role-Based) + Middleware Chain (Chain of Responsibility) + Higher-Order Function (factory pattern cho `requireRole(...)`) + Repository Pattern (Sequelize models cho Role/Permission/RolePermission).
+- Demo:
+  - Login as Patient → `GET /api/employees` → 403 `FORBIDDEN`.
+  - Đổi sang token Admin cùng endpoint → 200 + danh sách nhân viên.
+- **Khi giảng viên hỏi "Sao thiết kế Permission table mà không dùng?":** trả lời thẳng — đây là quyết định kiến trúc "ready-but-not-active". v1.0 chỉ cần phân vai trò; mô hình Permission giữ sẵn để v2.0 (hoặc khi yêu cầu phân quyền tinh xuất hiện) kích hoạt qua một thay đổi tối thiểu ở route layer — không phải migration DB hay đổi nghiệp vụ.
 
 ---
 
@@ -175,9 +192,9 @@ Khi giảng viên hỏi "Module X có yêu cầu chất lượng nào?", tra ng�
 | **Patient** | ASR-SEC-03, ASR-DI-04 | Security, Data Integrity |
 | **Doctor & Specialty** | ASR-MAN-02 (cấu hình specialty) | Manageability |
 | **Appointment & Visit** | **ASR-DI-01** ⭐, ASR-DI-03, ASR-AVL-01 (no-show job), ASR-DI-04 | Data Integrity, Availability |
-| **Prescription** | ASR-DI-04 | Data Integrity |
-| **Inventory** | ASR-DI-02 (xuất kho gắn invoice), ASR-AVL-01 (expiry check) | Data Integrity, Availability |
-| **Finance (Invoice / Payment / Refund / Payroll)** | **ASR-DI-02** ⭐, ASR-DI-03, ASR-DI-04 | Data Integrity |
+| **Prescription** | **ASR-DI-02** ⭐ (biên transaction kê đơn + xuất kho), ASR-DI-04 | Data Integrity |
+| **Inventory** | ASR-DI-02 (tồn kho bị trừ khi kê đơn), ASR-AVL-01 (expiry check) | Data Integrity, Availability |
+| **Finance (Invoice / Payment / Refund / Payroll)** | **ASR-DI-02** ⭐ (biên transaction tạo hóa đơn từ snapshot đơn thuốc), ASR-DI-03, ASR-DI-04 | Data Integrity |
 | **Shift & Attendance** | ASR-AVL-01 (cron schedule), ASR-DI-03 | Availability, Data Integrity |
 | **Notification** | ASR-AVL-03 (SMTP fail), ASR-MOD-03 | Availability, Modifiability |
 | **Admin (Audit / Report / Settings / Maintenance)** | ASR-MAN-01, ASR-MAN-02, ASR-MAN-03, ASR-DI-04, ASR-AVL-02 | Manageability, Data Integrity |
@@ -210,7 +227,8 @@ Khi giảng viên hỏi "Code này dùng pattern gì?", tra ở đây:
 | **Rate Limiting / Throttling** | `express-rate-limit` ở `/api` | ASR-PERF-02 |
 | **Token Revocation List** | Redis blacklist | ASR-SEC-01 |
 | **Self-scope Guard** | `requireSelfPatient` middleware | ASR-SEC-03 |
-| **RBAC** | `requirePermission` middleware | ASR-SEC-02 |
+| **RBAC (Role-Based)** | `requireRole(...)` middleware (đang dùng); `requirePermission(...)` (sẵn sàng kích hoạt) | ASR-SEC-02 |
+| **Higher-Order Function (factory)** | `requireRole(RoleCode.ADMIN)` trả về middleware tùy biến theo vai trò | ASR-SEC-02 |
 | **Bulkhead / Fallback / Retry** | Email service, Redis error handling | ASR-AVL-03 |
 | **Scheduler** | `node-cron` trong `jobs/scheduler.ts` | ASR-AVL-01 |
 | **Feature Toggle** | Maintenance mode flag | ASR-AVL-02 |
@@ -231,7 +249,8 @@ Khi giảng viên nói "Mở file [X] ra", biết ngay đường dẫn:
 | --- | --- | --- |
 | [Backend/src/app.ts](Backend/src/app.ts) | Application bootstrap, middleware pipeline | ASR-SEC-04, PERF-02, SCA-01 |
 | [Backend/src/middlewares/auth.middlewares.ts](Backend/src/middlewares/auth.middlewares.ts) | `verifyToken` — JWT + blacklist check | ASR-SEC-01 |
-| [Backend/src/middlewares/permission.middlewares.ts](Backend/src/middlewares/permission.middlewares.ts) | `requirePermission`, `requireAnyPermission` | ASR-SEC-02 |
+| [Backend/src/middlewares/roleCheck.middlewares.ts](Backend/src/middlewares/roleCheck.middlewares.ts) | `requireRole(...allowedRoles)` — tầng phân quyền *đang được dùng* ở mọi route nghiệp vụ | ASR-SEC-02 |
+| [Backend/src/middlewares/permission.middlewares.ts](Backend/src/middlewares/permission.middlewares.ts) | `requirePermission`, `requireAnyPermission`, `requireAllPermissions` — tầng fine-grained *sẵn sàng kích hoạt* khi cần phân quyền tinh hơn (chưa gắn ở route nào) | ASR-SEC-02 |
 | [Backend/src/middlewares/requireSelfPatient.middlewares.ts](Backend/src/middlewares/requireSelfPatient.middlewares.ts) | Self-scope guard cho Patient | ASR-SEC-03 |
 | [Backend/src/middlewares/requireContext.middlewares.ts](Backend/src/middlewares/requireContext.middlewares.ts) | Gắn patientId/doctorId vào req | ASR-SEC-03 |
 | [Backend/src/middlewares/sanitize.middlewares.ts](Backend/src/middlewares/sanitize.middlewares.ts) | HTML sanitization với dompurify | ASR-SEC-04 |

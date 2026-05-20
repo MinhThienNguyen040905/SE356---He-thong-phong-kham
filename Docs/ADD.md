@@ -34,7 +34,7 @@
 
 ## 1. Design Constraints
 
-- **Security**: Xác thực dùng token stateless kèm khả năng thu hồi ngay; phân quyền RBAC theo vai trò + permission chi tiết theo domain; toàn bộ input validate và sanitize ở biên; mật khẩu hash bằng thuật toán adaptive (kèm salt); bí mật cấu hình đọc từ secret store / biến môi trường và validate khi khởi động.
+- **Security**: Xác thực dùng token stateless kèm khả năng thu hồi ngay; phân quyền RBAC hai tầng — kiểm vai trò ở route layer (mặc định) và mô hình Role × Permission ở Database layer sẵn sàng để kích hoạt khi cần quyền chi tiết hơn; toàn bộ input validate và sanitize ở biên; mật khẩu hash bằng thuật toán adaptive (kèm salt); bí mật cấu hình đọc từ secret store / biến môi trường và validate khi khởi động.
 - **Performance**: ≥ 95% request danh sách / tìm kiếm phản hồi dưới 500 ms (P95); dashboard tổng hợp ≤ 1.5 s; báo cáo dải tháng < 5 s.
 - **Data Integrity**: Luồng đặt lịch khám và giao dịch tài chính nằm trong transaction kèm row-level lock; mọi chuyển trạng thái nghiệp vụ đi qua state machine tập trung; thao tác mutating trên dữ liệu nhạy cảm sinh audit log.
 - **Availability**: Mục tiêu uptime nghiệp vụ cốt lõi ≥ 99%; có chế độ bảo trì runtime; suy giảm có kiểm soát khi phụ thuộc ngoài lỗi.
@@ -60,16 +60,16 @@
 | Response | Dùng token stateless với thời hạn ngắn; mọi request đi qua một bước kiểm tra danh sách thu hồi trước khi xác thực chữ ký; sự kiện đăng xuất / đổi mật khẩu / khóa tài khoản thêm token vào danh sách thu hồi với TTL bằng thời hạn còn lại; hỗ trợ ba kênh đăng nhập (mật khẩu, OAuth bên thứ ba, OTP qua email). |
 | Response measure | Token bị thu hồi không còn truy cập được sau ≤ 1 giây trên toàn hệ thống. Trung bình thời gian xác thực token < 100 ms. ≥ 99.9% truy cập trái phép bị từ chối và log. |
 
-#### 2.1.2. ASR-SEC-02 — RBAC with Fine-grained Permissions
+#### 2.1.2. ASR-SEC-02 — Role-Based Access Control (with extensible fine-grained model)
 
 | Element | Statement |
 | --- | --- |
 | Stimulus | Người dùng có vai trò bất kỳ gọi một endpoint nghiệp vụ. |
 | Stimulus source | Bệnh nhân, Bác sĩ, Lễ tân, Admin. |
-| Environment | Vận hành bình thường; ma trận phân quyền có thể được admin cập nhật theo thời gian. |
+| Environment | Vận hành bình thường; ma trận phân quyền có thể được admin mở rộng theo thời gian. |
 | Artifact | Authorization middleware ở biên, mô hình quan hệ Role–Permission trong cơ sở dữ liệu. |
-| Response | Hệ thống có 4 vai trò chính (Admin, Doctor, Receptionist, Patient). Mỗi vai trò gắn với một tập permission khai báo theo domain. Một bước kiểm tra quyền tập trung chạy trước khi vào lớp nghiệp vụ. Ma trận quyền cấu hình ở dữ liệu, không hard-code; thay đổi có hiệu lực ở phiên kế tiếp mà không cần triển khai lại. |
-| Response measure | 100% endpoint mutating được bao phủ phân quyền. Thay đổi cấu hình quyền có hiệu lực ngay phiên kế tiếp. 0 hành động vượt quyền lọt qua trong test phân quyền. |
+| Response | Phân quyền triển khai theo **hai tầng**: (1) **Tầng vai trò (coarse-grained)** — kiểm tra vai trò của người gọi (Admin, Doctor, Receptionist, Patient) trước khi vào lớp nghiệp vụ; đây là tầng được áp dụng mặc định cho mọi endpoint nghiệp vụ vì với 4 vai trò cố định, kiểm vai trò đã đủ phân tách ngữ cảnh truy cập. (2) **Tầng quyền chi tiết (fine-grained, sẵn sàng kích hoạt)** — mô hình quan hệ Role × Permission ở Database layer cho phép gán từng quyền theo domain (ví dụ "tạo hóa đơn", "hoàn tiền") cho từng vai trò; tầng này được giữ sẵn để khi nhu cầu phân quyền tinh hơn xuất hiện (thêm vai trò mới như Pharmacist, hay tách quyền nội bộ trong Admin) chỉ cần thay middleware ở tầng route — không phải đổi mô hình dữ liệu hay logic nghiệp vụ. |
+| Response measure | 100% endpoint mutating đi qua bước kiểm tra phân quyền trước khi vào nghiệp vụ. 0 hành động vượt quyền lọt qua trong test phân quyền. Bổ sung quyền chi tiết mới cho một vai trò có hiệu lực ở phiên kế tiếp mà không cần triển khai lại. |
 
 #### 2.1.3. ASR-SEC-03 — Patient Data Self-scope Enforcement
 
@@ -149,12 +149,12 @@
 
 | Element | Statement |
 | --- | --- |
-| Stimulus | Tạo hóa đơn cho lượt khám gồm nhiều mục (phí khám + thuốc), ghi nhận thanh toán, hoặc xử lý hoàn tiền. |
-| Stimulus source | Lễ tân, Admin. |
-| Environment | Quá trình tạo / cập nhật chứng từ tài chính, có thể gặp lỗi giữa chừng. |
-| Artifact | Finance module (hóa đơn, thanh toán, hoàn tiền), Inventory module (xuất thuốc), lớp persistence. |
-| Response | Service finance điều phối transaction xuyên module; cập nhật tồn kho thuốc trong cùng transaction khi xuất thuốc gắn hóa đơn; sinh mã chứng từ trong cùng transaction; rollback toàn bộ nếu một bước thất bại; xử lý hoàn tiền cũng nguyên tử với cập nhật trạng thái hóa đơn và phục hồi tồn kho khi cần. |
-| Response measure | 0 hóa đơn "mồ côi" hoặc tồn kho lệch trong test inject lỗi. 100% giao dịch tài chính có log thành công / thất bại. |
+| Stimulus | Bác sĩ kê đơn thuốc (đồng thời xuất thuốc khỏi kho), lễ tân tạo hóa đơn cho lượt khám gồm phí khám và các mục thuốc đã kê, ghi nhận thanh toán, hoặc xử lý hoàn tiền. |
+| Stimulus source | Bác sĩ (kê đơn), Lễ tân, Admin (hóa đơn, thanh toán, hoàn tiền). |
+| Environment | Quá trình tạo / cập nhật chứng từ y tế và tài chính, có thể gặp lỗi giữa chừng. |
+| Artifact | Prescription service, Finance service, Inventory service, lớp persistence. |
+| Response | Luồng nguyên tử được tách thành **hai biên transaction** theo trách nhiệm nghiệp vụ: (1) **Biên kê đơn** – cùng một transaction (mức cô lập READ COMMITTED) bao gọn việc tạo đơn thuốc, ghi từng mục đơn, trừ tồn kho thuốc (kèm row-level lock trên thực thể thuốc tương ứng), ghi nhận xuất kho và cập nhật trạng thái lượt khám sang trạng thái "đã khám"; (2) **Biên tạo hóa đơn** – một transaction khác bao gọn việc sinh mã hóa đơn, tạo hóa đơn, tạo các mục hóa đơn cho phí khám và cho từng mục đơn thuốc bằng cách đọc lại giá / số lượng đã được chốt ở biên kê đơn (snapshot), và chống tạo trùng cho cùng một lượt khám. Hoàn tiền nguyên tử với cập nhật trạng thái hóa đơn và phục hồi tồn kho khi đơn thuốc bị hủy. Khi sửa đơn thuốc đã sinh hóa đơn, transaction phục hồi tồn kho theo đơn cũ, trừ lại tồn kho theo đơn mới và đồng bộ các mục thuốc trên hóa đơn — tất cả trong cùng một transaction. |
+| Response measure | 0 hóa đơn "mồ côi" hoặc tồn kho lệch trong test inject lỗi ở mỗi biên transaction. 100% giao dịch tài chính có log thành công / thất bại. Tồn kho không bao giờ âm dưới concurrency nhờ row-level lock trên thực thể thuốc. |
 
 #### 2.3.3. ASR-DI-03 — Explicit State Machine for Business Entities
 
@@ -673,7 +673,44 @@ sequenceDiagram
     end
 ```
 
-#### 3.5.2. Atomic invoice + inventory dispense (ASR-DI-02)
+#### 3.5.2. Atomic prescription dispense + invoice creation (ASR-DI-02)
+
+Luồng tài chính tách thành **hai biên transaction**: (a) kê đơn kèm xuất kho do bác sĩ kích hoạt, (b) tạo hóa đơn do lễ tân kích hoạt sau khi đơn thuốc đã chốt. Mỗi biên là một transaction nguyên tử độc lập.
+
+##### 3.5.2.a. Prescription transaction (kê đơn + xuất kho)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor D as Doctor
+    participant API as API Boundary
+    participant RX as Prescription Service
+    participant DB as Relational DB
+
+    D->>API: Yêu cầu kê đơn cho lượt khám
+    API->>RX: Tạo đơn thuốc (lượt khám, danh sách mục)
+    RX->>DB: Begin transaction (READ COMMITTED)
+    RX->>DB: Tạo đơn thuốc (header)
+    loop cho từng mục thuốc
+        RX->>DB: Khóa hàng thực thể thuốc (row-level lock)
+        alt thuốc đang hoạt động & đủ tồn kho
+            RX->>DB: Giảm tồn kho theo số lượng kê
+            RX->>DB: Tạo mục đơn thuốc (snapshot tên, đơn vị, đơn giá)
+            RX->>DB: Tạo bản ghi xuất kho gắn với đơn
+        else thuốc bị khóa / không đủ tồn kho
+            RX-->>DB: Rollback
+            RX-->>API: Domain error (không đủ tồn kho / thuốc không khả dụng)
+            API-->>D: 4xx error
+        end
+    end
+    RX->>DB: Tổng hợp giá trị đơn thuốc
+    RX->>DB: Chuyển trạng thái lượt khám sang "đã khám" (qua state machine)
+    RX->>DB: Commit
+    RX-->>API: Đơn thuốc đã tạo
+    API-->>D: 201 + đơn thuốc
+```
+
+##### 3.5.2.b. Invoice transaction (tạo hóa đơn từ snapshot)
 
 ```mermaid
 sequenceDiagram
@@ -681,31 +718,31 @@ sequenceDiagram
     actor R as Receptionist
     participant API as API Boundary
     participant FIN as Finance Service
-    participant INV as Inventory Service
     participant DB as Relational DB
 
-    R->>API: Create invoice for visit (items)
-    API->>FIN: Create invoice (visitId, items)
+    R->>API: Yêu cầu tạo hóa đơn cho lượt khám
+    API->>FIN: Tạo hóa đơn (lượt khám, phí khám)
     FIN->>DB: Begin transaction
-    FIN->>DB: Insert invoice header (PENDING)
-    loop for each medicine item
-        FIN->>INV: Dispense (medicineId, qty, tx)
-        INV->>DB: Conditional decrement stock (qty ≤ available)
-        alt stock OK
-            INV->>DB: Insert medicine export record
-            FIN->>DB: Insert invoice item
-        else stock insufficient
-            INV-->>FIN: Domain error (STOCK_INSUFFICIENT)
-            FIN->>DB: Rollback
-            FIN-->>API: error
-            API-->>R: 4xx error
+    FIN->>DB: Đọc lượt khám và đơn thuốc kèm các mục
+    alt đã tồn tại hóa đơn cho lượt khám
+        FIN-->>DB: Rollback
+        FIN-->>API: Domain error (hóa đơn đã tồn tại)
+        API-->>R: 4xx error
+    else chưa có hóa đơn
+        FIN->>DB: Sinh mã hóa đơn trong transaction
+        FIN->>DB: Tạo hóa đơn (trạng thái chưa thanh toán)
+        FIN->>DB: Tạo mục hóa đơn cho phí khám
+        loop cho từng mục đơn thuốc
+            FIN->>DB: Tạo mục hóa đơn (snapshot từ mục đơn thuốc)
         end
+        FIN->>DB: Tổng hợp giá trị hóa đơn
+        FIN->>DB: Commit
+        FIN-->>API: Hóa đơn đã tạo
+        API-->>R: 201 + hóa đơn
     end
-    FIN->>DB: Advance visit state via state machine
-    FIN->>DB: Commit
-    FIN-->>API: Invoice ready
-    API-->>R: 201 + invoice
 ```
+
+> Lưu ý kiến trúc: **tồn kho đã được trừ ở biên (a)**, nên biên (b) không động chạm tồn kho — chỉ đọc snapshot giá / số lượng từ các mục đơn thuốc. Quyết định này ưu tiên đảm bảo bác sĩ không kê đơn vượt tồn kho ngay tại thời điểm khám, đổi lại khi cần sửa đơn đã có hóa đơn, transaction sửa đơn phải phối hợp phục hồi tồn kho cũ, trừ lại tồn kho mới và đồng bộ các mục hóa đơn trong cùng một transaction để giữ tính nguyên tử xuyên hai biên.
 
 #### 3.5.3. Authentication, request validation và token revocation (ASR-SEC-01)
 
@@ -813,7 +850,9 @@ flowchart LR
     AUDIT --> RES([2xx response])
 ```
 
-#### 3.6.2. RBAC model (ASR-SEC-02)
+#### 3.6.2. RBAC model — hai tầng phân quyền (ASR-SEC-02)
+
+Mô hình dữ liệu hỗ trợ cả tầng coarse-grained (vai trò) và tầng fine-grained (quyền theo domain). Tầng vai trò là tầng *được kích hoạt mặc định* ở route layer; tầng quyền chi tiết được giữ sẵn dưới CSDL để kích hoạt khi nhu cầu phân quyền tinh hơn xuất hiện.
 
 ```mermaid
 erDiagram
@@ -842,6 +881,8 @@ erDiagram
     }
 ```
 
+**Đường nâng cấp:** khi cần phân quyền tinh hơn (ví dụ tách quyền nội bộ trong Admin, hoặc thêm vai trò Pharmacist), middleware ở route layer chuyển từ kiểm tra vai trò sang kiểm tra quyền chi tiết — đọc Role × Permission qua bảng RolePermission. Lớp nghiệp vụ không phải đổi.
+
 #### 3.6.3. Token lifecycle (ASR-SEC-01)
 
 ```mermaid
@@ -863,7 +904,7 @@ stateDiagram-v2
 | Transport | HTTPS bắt buộc ở reverse proxy; bảo vệ tầng nội bộ giữa backend ↔ store ngoài | ASR-SEC-05 |
 | Edge | Security headers, CORS allow-list, rate limit theo IP/user, giới hạn kích thước body | ASR-SEC-04, ASR-PERF-02 |
 | Identity | Token stateless + danh sách thu hồi ngoài tiến trình; hash adaptive + salt; OTP qua email; OAuth provider ngoài | ASR-SEC-01, ASR-SEC-05 |
-| Authorization | RBAC (Role × Permission) + self-scope cho bệnh nhân | ASR-SEC-02, ASR-SEC-03 |
+| Authorization | RBAC hai tầng: vai trò ở route (mặc định) + Role × Permission sẵn sàng kích hoạt; self-scope cho bệnh nhân | ASR-SEC-02, ASR-SEC-03 |
 | Input | Schema validation + HTML sanitization ở biên | ASR-SEC-04 |
 | State change | Centralized state machine cho lifecycle nghiệp vụ | ASR-DI-03 |
 | Observability | Audit log đầy đủ giá trị trước / sau cho mọi mutating action | ASR-DI-04, ASR-MAN-01 |
