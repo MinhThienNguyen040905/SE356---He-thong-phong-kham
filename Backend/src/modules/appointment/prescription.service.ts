@@ -18,6 +18,37 @@ import {
   generateExportCode,
   generateInvoiceCode,
 } from "../../utils/codeGenerator";
+import {
+  AppointmentStateMachine,
+  VisitStateMachine,
+} from "../../utils/stateMachine";
+import { AppointmentStatus } from "../../constant/appointment";
+
+// ============================================================
+// GoF Design Patterns được dùng trong file này:
+//
+// 1) Template Method (Behavioral) — sequelize.transaction(callback)
+//    Khung cố định BEGIN -> callback -> COMMIT/ROLLBACK do Sequelize cung cấp.
+//    Xem 3 chỗ trong file: createPrescriptionService, updatePrescriptionService,
+//    cancelPrescriptionService.
+//
+// 2) State Pattern (Behavioral) — AppointmentStateMachine / VisitStateMachine
+//    Tập trung quy tắc chuyển trạng thái vào lớp riêng. Mỗi lần đổi status đều
+//    gọi validateTransition(...) để chặn transition không hợp lệ.
+//    Xem 2 chỗ trong file: trước khi đổi Appointment.status và Visit.status.
+//
+// 3) Memento Pattern (Behavioral) — createMedicineMemento(medicine)
+//    PrescriptionDetail giữ snapshot của Medicine (tên/đơn vị/giá) tại thời điểm
+//    kê đơn, để đơn thuốc và hóa đơn cô lập khỏi thay đổi giá / tên thuốc sau này.
+// ============================================================
+
+// Memento Pattern (GoF, Behavioral) — helper "chụp ảnh" Medicine tại thời điểm kê.
+// Originator = Medicine, Memento = object trả về, Caretaker = PrescriptionDetail.
+const createMedicineMemento = (medicine: Medicine) => ({
+  medicineName: medicine.name,
+  unit: medicine.unit,
+  unitPrice: medicine.salePrice,
+});
 
 
 interface MedicineInput {
@@ -48,6 +79,9 @@ export const createPrescriptionService = async (
   patientId: number,
   input: CreatePrescriptionInput
 ) => {
+  // Template Method Pattern (GoF, Behavioral):
+  // Sequelize cung cấp khung cố định BEGIN -> callback -> COMMIT/ROLLBACK.
+  // Service chỉ lấp phần biến đổi (callback) — không phải tự viết transaction lifecycle.
   return await sequelize.transaction(
     {
       isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
@@ -79,6 +113,13 @@ export const createPrescriptionService = async (
         throw new Error("APPOINTMENT_NOT_FOUND");
       }
       if (appointment.status === "CHECKED_IN") {
+        // ----- State Pattern (GoF, Behavioral) -----
+        // Mọi chuyển trạng thái Appointment đi qua AppointmentStateMachine
+        // để chặn transition không hợp lệ (ví dụ CANCELLED -> COMPLETED).
+        AppointmentStateMachine.validateTransition(
+          AppointmentStatus.CHECKED_IN,
+          AppointmentStatus.IN_PROGRESS
+        );
         appointment.status = "IN_PROGRESS";
         await appointment.save({ transaction: t });
       } else if (appointment.status !== "IN_PROGRESS") {
@@ -151,10 +192,8 @@ export const createPrescriptionService = async (
           {
             prescriptionId: prescription.id,
             medicineId: medicine.id,
-            medicineName: medicine.name, 
+            ...createMedicineMemento(medicine), // Memento Pattern: snapshot tên/đơn vị/giá
             quantity: item.quantity,
-            unit: medicine.unit, 
-            unitPrice: medicine.salePrice, 
             dosageMorning: item.dosageMorning,
             dosageNoon: item.dosageNoon,
             dosageAfternoon: item.dosageAfternoon,
@@ -184,11 +223,14 @@ export const createPrescriptionService = async (
       prescription.totalAmount = totalAmount;
       await prescription.save({ transaction: t });
 
-      
+
       if (visit.status !== "COMPLETED") {
-        
         if (visit.status !== "EXAMINED") {
-           visit.status = "EXAMINED";
+          // ----- State Pattern (GoF, Behavioral) -----
+          // Mọi chuyển trạng thái Visit đi qua VisitStateMachine để chặn
+          // transition không hợp lệ (ví dụ CANCELLED -> EXAMINED).
+          VisitStateMachine.validateTransition(visit.status, "EXAMINED");
+          visit.status = "EXAMINED";
         }
         visit.checkOutTime = visit.checkOutTime ?? new Date();
         await visit.save({ transaction: t });
@@ -212,6 +254,8 @@ export const updatePrescriptionService = async (
   doctorId: number,
   input: UpdatePrescriptionInput
 ) => {
+  // Template Method Pattern (GoF, Behavioral):
+  // Khung BEGIN -> callback -> COMMIT/ROLLBACK do Sequelize cung cấp.
   return await sequelize.transaction(
     {
       isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
@@ -317,10 +361,8 @@ export const updatePrescriptionService = async (
             {
               prescriptionId: prescription.id,
               medicineId: medicine.id,
-              medicineName: medicine.name,
+              ...createMedicineMemento(medicine), // Memento Pattern: snapshot tên/đơn vị/giá
               quantity: item.quantity,
-              unit: medicine.unit,
-              unitPrice: medicine.salePrice,
               dosageMorning: item.dosageMorning,
               dosageNoon: item.dosageNoon,
               dosageAfternoon: item.dosageAfternoon,
@@ -396,6 +438,8 @@ export const cancelPrescriptionService = async (
   prescriptionId: number,
   doctorId: number
 ) => {
+  // Template Method Pattern (GoF, Behavioral):
+  // Khung BEGIN -> callback -> COMMIT/ROLLBACK do Sequelize cung cấp.
   return await sequelize.transaction(
     {
       isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
