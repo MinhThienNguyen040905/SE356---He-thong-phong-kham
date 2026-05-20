@@ -145,25 +145,16 @@ Below are the main sections of the document:
 @startuml
 |User|
 start
-:Enter sign in details (email, password);
+:(1) Enter sign in details (email, password);
 |System|
-:Send credentials to Authentication controller;
-if (data is valid?) then (yes)
-  :Look up User by email;
-  if (bcrypt.compare(password, hashedPassword)?) then (matches)
-    :Generate JWT token (userId, roleId, expiry);
-    :Resolve patientId/doctorId from User;
-    :Notification "Logged in successfully";
-    :Redirect to role-specific home page;
-    stop
-  else (no match)
-    |User|
-    :Notification "Email or password is incorrect";
-    stop
-  endif
+:(2) Send credentials to Authentication controller;
+if ((3) data is valid?) then (yes)
+  :(5) Notification "Logged in successfully";
+  :(6) Redirect to role-specific home page;
+  stop
 else (no)
   |User|
-  :Notification "Please fill in all fields";
+  :(4) Notification "Email or password is incorrect";
   stop
 endif
 @enduml
@@ -196,43 +187,38 @@ endif
 @startuml
 |User|
 start
-:Enter sign up details (fullName, email, password, phone);
+:(1) Enter sign up details (fullName, email, password, phone);
 |System|
-:Validate inputs;
+:(2) Validate inputs;
 if (inputs valid?) then (no)
   |User|
-  :Show validation error;
+  :(3) Show validation error;
   stop
 else (yes)
 endif
-:Check if email already exists in User table;
+:(4) Send to User controller;
+:(5) Check if email already exists;
 if (email exists?) then (yes)
   |User|
-  :Show "Email already registered" error;
+  :(6) Show "Email already registered" error;
   stop
 else (no)
 endif
-:Hash password with bcrypt (cost 10);
-:Generate 6-digit OTP code;
-:Store {hashedPassword, fullName, phone, otp} in Redis with key otp:register:{email}, TTL 5 minutes;
-:Send OTP email to user;
+:(7) Hash password with bcrypt (cost 10);
+:(8) Generate OTP, store in Redis (TTL 5min), send OTP email;
 |User|
-:Receive email, enter OTP;
+:(9) Receive email, enter OTP;
 |System|
-:Verify OTP against Redis;
+:(10) Send OTP to verification controller;
+:(11) Verify OTP against Redis;
 if (OTP valid?) then (yes)
-  :Begin transaction;
-  :Insert into User (email, hashedPassword, fullName, roleId=PATIENT, status=ACTIVE);
-  :Insert into Patient (userId, fullName, phone);
-  :Commit transaction;
-  :Delete OTP from Redis;
+  :(12) Begin transaction, insert User and Patient, commit, delete OTP;
   |User|
-  :Notification "Registration successful";
-  :Redirect to sign in page;
+  :(13) Notification "Registration successful" and redirect to sign in;
   stop
 else (no)
   |User|
-  :Show "Invalid or expired OTP" error;
+  :(14) Show "Invalid or expired OTP" error;
   stop
 endif
 @enduml
@@ -267,45 +253,37 @@ endif
 @startuml
 |User|
 start
-:Click "Forgot Password" link;
+:(1) Click "Forgot Password" link;
 |System|
-:Display Forgot Password page;
+:(2) Display Forgot Password page;
 |User|
-:Enter registered email;
+:(3) Enter registered email;
 |System|
-:Validate email format and existence;
-if (email valid and exists?) then (yes)
-  :Generate password reset token with TTL 10 minutes;
-  :Store token in Redis: SETEX reset:token:{userId} 600 {token};
-  :Send reset link to user's email;
+if ((4) email valid and exists?) then (yes)
+  :(5) Generate reset token (TTL 10 min), store in Redis;
+  :(6) Send reset link to user's email;
 else (no)
   |User|
   :Show error message;
   stop
 endif
 |User|
-:Click reset link in email;
+:(7) Click reset link in email;
 |System|
-:Validate reset token;
-if (token valid and not expired?) then (yes)
-  :Display Reset Password page;
+if ((8) token valid and not expired?) then (yes)
+  :(9) Redirect to Change Password page;
 else (no)
   |User|
-  :Show "Invalid or expired link" message;
+  :(10) Notification "Invalid verification link";
   stop
 endif
 |User|
-:Enter new password and confirm;
+:(11) Enter new password;
 |System|
-:Validate new password;
-if (password valid?) then (yes)
-  :Hash new password with bcrypt;
-  :Update User.passwordHash;
-  :Delete reset token from Redis;
-  :Add all existing tokens of this user to blacklist;
+if ((12) password valid and different from old?) then (yes)
+  :(13) Hash new password, update User.passwordHash, revoke all tokens;
   |User|
-  :Notification "Password reset successful";
-  :Redirect to sign in page;
+  :(14) Redirect to sign in page;
   stop
 else (no)
   |User|
@@ -344,32 +322,28 @@ endif
 @startuml
 |User|
 start
-:Click "Sign In with Google";
+:(1) Click "Sign In with Google";
 |System|
-:Redirect to Google OAuth consent screen;
+:(2) Redirect to Google OAuth consent screen;
 |User|
-:Authenticate with Google and grant consent;
+:(3) Authenticate with Google and grant consent;
 |System|
-:Receive authorization code at /api/auth/oauth/google/callback;
-:Exchange code for access token via Google API;
-:Fetch user profile (email, name, picture);
-:Look up User by email;
-if (user exists?) then (yes)
+:(4) Receive authorization code at callback URL;
+:(5) Exchange code for access token, fetch user profile;
+:(6) Look up User by email;
+if ((7) user exists?) then (no)
+  :(8) Begin transaction, auto-provision User (PATIENT) and Patient, commit;
+else (yes)
   if (user.status == BANNED?) then (yes)
     |User|
     :Show "Account banned" error;
     stop
   else (no)
   endif
-else (no)
-  :Begin transaction;
-  :Create User (email, fullName, roleId=PATIENT, status=ACTIVE, oauthProvider='GOOGLE');
-  :Create Patient (userId, fullName);
-  :Commit transaction;
 endif
-:Issue JWT token;
+:(9) Issue JWT token;
 |User|
-:Receive token and redirect to home page;
+:(10) Receive token and redirect to home page;
 stop
 @enduml
 ```
@@ -379,8 +353,8 @@ stop
 | Activity | BR Code | Description |
 | --- | --- | --- |
 | (2) | BR17 | **OAuth Redirect Rules:**<br/>• Redirect URL: `https://accounts.google.com/o/oauth2/v2/auth?client_id={GOOGLE_CLIENT_ID}&redirect_uri={callback}&scope=openid+email+profile&response_type=code&state={csrf_token}`. |
-| (4) | BR18 | **Token Exchange Rules:**<br/>• Verify `state` parameter matches CSRF token.<br/>• POST to `https://oauth2.googleapis.com/token` with code, client_id, client_secret.<br/>• If exchange fails, redirect to sign in page with error MSG 56. |
-| (7) | BR19 | **Auto Provisioning Rules:**<br/>• If [user] == null:<br/>&nbsp;&nbsp;[user] = new User { email: [google.email], fullName: [google.name], oauthProvider: 'GOOGLE', roleId: PATIENT, status: ACTIVE, passwordHash: null }.<br/>&nbsp;&nbsp;[patient] = new Patient { userId: [user.id], fullName: [google.name] }.<br/>• If [user] exists and [user.oauthProvider] is null, link Google account by setting [user.oauthProvider] = 'GOOGLE'. |
+| (5) | BR18 | **Token Exchange Rules:**<br/>• Verify `state` parameter matches CSRF token.<br/>• POST to `https://oauth2.googleapis.com/token` with code, client_id, client_secret.<br/>• If exchange fails, redirect to sign in page with error MSG 56. |
+| (8) | BR19 | **Auto Provisioning Rules:**<br/>• If [user] == null:<br/>&nbsp;&nbsp;[user] = new User { email: [google.email], fullName: [google.name], oauthProvider: 'GOOGLE', roleId: PATIENT, status: ACTIVE, passwordHash: null }.<br/>&nbsp;&nbsp;[patient] = new Patient { userId: [user.id], fullName: [google.name] }.<br/>• If [user] exists and [user.oauthProvider] is null, link Google account by setting [user.oauthProvider] = 'GOOGLE'. |
 
 ---
 
@@ -400,15 +374,13 @@ stop
 @startuml
 |User|
 start
-:Click "Sign Out";
+:(1) Click "Sign Out";
 |System|
-:Extract JWT token from Authorization header;
-:Decode token to get expiry timestamp;
-:Calculate remaining TTL = expiry - now;
-:Add token to Redis blacklist: SETEX blacklist:token:{jwt} {remainingTtl} "1";
-:Clear client-side token storage;
+:(2) Extract JWT token from Authorization header;
+:(3) Add token to Redis blacklist with remaining TTL;
+:(4) Clear client-side token storage;
 |User|
-:Redirect to sign in page;
+:(5) Redirect to sign in page;
 stop
 @enduml
 ```
@@ -438,33 +410,30 @@ stop
 @startuml
 |User|
 start
-:Enter current password, new password, confirm new password;
+:(1) Enter current password, new password, confirm new password;
 |System|
-:Validate current password matches User.passwordHash;
-if (current password correct?) then (no)
+if ((2) current password matches User.passwordHash?) then (no)
   |User|
   :Show "Current password incorrect" error;
   stop
 else (yes)
 endif
-:Validate new password strength;
-if (new password valid?) then (no)
+if ((4) new password meets strength rules?) then (no)
   |User|
   :Show validation error;
   stop
 else (yes)
 endif
-if (new password == current password?) then (yes)
+if ((6) new password same as old?) then (yes)
   |User|
   :Show "Cannot reuse old password" error;
   stop
 else (no)
 endif
-:Hash new password with bcrypt;
-:Update User.passwordHash;
-:Revoke all active tokens of this user;
+:(8) Hash new password and update User.passwordHash;
+:(9) Revoke all active tokens of this user;
 |User|
-:Show success message and redirect to sign in;
+:(10) Show success and redirect to sign in;
 stop
 @enduml
 ```
@@ -496,22 +465,19 @@ stop
 @startuml
 |User|
 start
-:Edit profile fields (fullName, phone, dateOfBirth, gender, address);
-:(Optional) Upload new avatar;
+:(1) Edit profile fields (fullName, phone, dateOfBirth, gender, address);
+:(2) Optionally upload new avatar;
 :Click "Save";
 |System|
-:Validate inputs;
-if (inputs valid?) then (yes)
-  if (avatar uploaded?) then (yes)
-    :Validate file size ≤ 5MB and MIME type ∈ {image/jpeg, image/png, image/webp};
-    :Save file to uploads/avatars/{userId}_{timestamp}.{ext};
-    :Update User.avatar field;
+if ((3) inputs valid?) then (yes)
+  if ((4) avatar uploaded?) then (yes)
+    :(5) Validate file size and MIME type, save to uploads, update User.avatar;
   else (no)
   endif
-  :Update User table with new fields;
-  :Audit middleware logs the change;
+  :(6) Update User table with new fields;
+  :(7) Audit middleware logs the change;
   |User|
-  :Show success message;
+  :(8) Show success message;
   stop
 else (no)
   |User|
@@ -526,8 +492,8 @@ endif
 | Activity | BR Code | Description |
 | --- | --- | --- |
 | (3) | BR26 | **Validate Rules:** Check [fullName] is not empty, [phone] matches Vietnam phone pattern (BR5), [dateOfBirth] is a valid date in the past, [gender] ∈ {MALE, FEMALE, OTHER}. |
-| (4) | BR27 | **Avatar Upload Rules:** If file size > 5MB, show MSG 11. If MIME type not in allowed list, show MSG 58. Store file path in User.avatar. |
-| (6) | BR28 | **Audit Rules:** Audit middleware captures old and new values and writes to AuditLog table asynchronously. |
+| (5) | BR27 | **Avatar Upload Rules:** If file size > 5MB, show MSG 11. If MIME type not in allowed list, show MSG 58. Store file path in User.avatar. |
+| (7) | BR28 | **Audit Rules:** Audit middleware captures old and new values and writes to AuditLog table asynchronously. |
 
 ---
 
@@ -547,37 +513,22 @@ endif
 @startuml
 |Admin|
 start
-:Click "Create Employee" or select employee to edit;
+:(1) Click "Create Employee" or select employee to edit;
 |System|
-:Display Employee form;
+:(2) Display Employee form;
 |Admin|
-:Fill in employee details (fullName, email, phone, role, salary);
-:If role = DOCTOR, also fill specialtyId, licenseNumber;
-:Click "Save";
+:(3) Fill in employee details (fullName, email, phone, role, salary);
+:(4) Click "Save";
 |System|
-:Validate inputs and permission;
-if (valid and admin has 'employees.manage' permission?) then (yes)
-  :Begin transaction;
-  if (create mode?) then (yes)
-    :Generate temporary password;
-    :Create User with role and hashed password;
-    :Create Employee with salary, hireDate;
-    if (role == DOCTOR?) then (yes)
-      :Create Doctor with specialtyId;
-    else
-    endif
-    :Send welcome email with temporary password;
-  else (update)
-    :Update User and Employee fields;
-  endif
-  :Commit transaction;
-  :Audit log the action;
+if ((5) inputs valid and admin has 'employees.manage' permission?) then (yes)
+  :(6) Begin transaction, create or update User+Employee (and Doctor if role=DOCTOR), commit;
+  :(7) Audit log the action;
   |Admin|
-  :Show success message;
+  :(8) Show success message;
   stop
 else (no)
   |Admin|
-  :Show permission denied error;
+  :Show permission denied or validation error;
   stop
 endif
 @enduml
@@ -587,7 +538,7 @@ endif
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (3) | BR29 | **Permission Check:** Middleware `requirePermission('employees.manage')` must pass. Else, return 403 with MSG 15. |
+| (5) | BR29 | **Permission Check:** Middleware `requirePermission('employees.manage')` must pass. Else, return 403 with MSG 15. |
 | (5) | BR30 | **Validate Rules:** Check [fullName], [email], [phone], [roleId ∈ {DOCTOR, RECEPTIONIST}], [salary ≥ 0]. If [roleId] == DOCTOR, require [specialtyId] and [licenseNumber]. |
 | (6) | BR31 | **Create Rules:** Temporary password = `crypto.randomBytes(8).toString('hex')`. Hash with bcrypt. Send welcome email with the temp password and instruction to change on first login. |
 | (7) | BR32 | **Audit Rules:** Insert audit log entry with action='CREATE_EMPLOYEE' or 'UPDATE_EMPLOYEE'. |
@@ -610,49 +561,32 @@ endif
 @startuml
 |Patient|
 start
-:Select specialty;
+:(1) Select specialty;
 |System|
-:Display list of doctors in that specialty;
+:(2) Display list of doctors in that specialty;
 |Patient|
-:Select doctor;
+:(3) Select doctor;
 |System|
-:Display calendar showing available shifts for next 14 days;
+:(4) Display calendar showing available shifts for next 14 days;
 |Patient|
-:Select date and shift;
-:Enter symptom description (optional);
-:Click "Confirm Booking";
+:(5) Select date and shift, enter symptom (optional), click "Confirm Booking";
 |System|
-:Begin transaction (READ COMMITTED);
-:SELECT * FROM DoctorShift WHERE doctorId=? AND shiftId=? AND workDate=? FOR UPDATE;
-if (DoctorShift exists?) then (no)
-  :Rollback;
+:(6) Begin transaction (READ COMMITTED);
+:(7) SELECT DoctorShift FOR UPDATE;
+:(8) Validate shift active and not ended;
+:(9) Count active appointments and check against maxSlots;
+if (slots available and shift not ended?) then (yes)
+  :(10) Generate appointmentCode and INSERT Appointment with status WAITING;
+  :(11) Commit transaction;
+  :(12) Emit AppointmentCreated event (notification + email sent async);
+  :(13) Audit log entry inserted;
   |Patient|
-  :Show "Doctor not on duty" error;
-  stop
-else (yes)
-endif
-if (current date and shift.endTime < now?) then (yes)
-  :Rollback;
-  |Patient|
-  :Show "Shift already ended" error;
-  stop
-else (no)
-endif
-:SELECT COUNT(*) FROM Appointment WHERE doctorShiftId=? AND status NOT IN ('CANCELLED', 'NO_SHOW');
-if (count < maxSlots?) then (yes)
-  :Generate appointmentCode;
-  :INSERT INTO Appointment (...) VALUES (..., 'WAITING', code);
-  :Commit;
-  :Emit AppointmentCreated event;
-  :Notification service sends email + in-app notification;
-  :Audit log entry inserted;
-  |Patient|
-  :Show success with appointment code;
+  :(14) Show success with appointment code;
   stop
 else (no)
   :Rollback;
   |Patient|
-  :Show "Slots full" error;
+  :Show "Slots full" or "Shift ended" error;
   stop
 endif
 @enduml
@@ -662,8 +596,8 @@ endif
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (4) | BR33 | **Doctor Listing Rules:**<br/>• Fetch all Doctor records WHERE specialtyId=[selected] AND isActive=true.<br/>• Sort by experienceYears DESC. |
-| (6) | BR34 | **Shift Availability Rules:**<br/>• For each date in next 14 days, fetch DoctorShift WHERE doctorId=[selected] AND workDate=[date].<br/>• For each DoctorShift, calculate `availableSlots = ds.maxSlots - count(active appointments)`.<br/>• Only show shifts with `availableSlots > 0`. |
+| (2) | BR33 | **Doctor Listing Rules:**<br/>• Fetch all Doctor records WHERE specialtyId=[selected] AND isActive=true.<br/>• Sort by experienceYears DESC. |
+| (4) | BR34 | **Shift Availability Rules:**<br/>• For each date in next 14 days, fetch DoctorShift WHERE doctorId=[selected] AND workDate=[date].<br/>• For each DoctorShift, calculate `availableSlots = ds.maxSlots - count(active appointments)`.<br/>• Only show shifts with `availableSlots > 0`. |
 | (9) | BR35 | **Concurrent Booking Rules (CRITICAL):**<br/>• Wrap booking logic in `sequelize.transaction({ isolationLevel: READ_COMMITTED })`.<br/>• Lock the target DoctorShift row using `lock: t.LOCK.UPDATE`.<br/>• Count active appointments AFTER acquiring lock.<br/>• If `count >= maxSlots`, throw `SLOTS_FULL` error with message MSG 59.<br/>• If [date] == today and `now() >= shift.endTime`, throw `SHIFT_ALREADY_ENDED` with MSG 60. |
 | (10) | BR36 | **Code Generation Rules:**<br/>• Format: `APT-YYYYMMDD-XXXXX` where XXXXX is a 5-digit sequence.<br/>• Generated within the same transaction to avoid duplicates. |
 | (12) | BR37 | **Event Emission Rules:**<br/>• Emit `AppointmentCreated` event via internal event bus AFTER commit.<br/>• Notification service listens and: (a) inserts Notification record, (b) queues email via Nodemailer. |
@@ -687,27 +621,25 @@ endif
 @startuml
 |Receptionist|
 start
-:Search patient by phone or name;
+:(1) Search patient by phone or name;
 |System|
-:Display matching patients;
+:(2) Display matching patients;
 |Receptionist|
-if (patient exists?) then (yes)
-  :Select existing patient;
+if ((3) patient exists?) then (yes)
+  :(4) Select existing patient;
 else (no)
-  :Fill in new patient info (fullName, phone, dob, gender);
+  :(5) Fill in new patient info (fullName, phone, dob, gender);
   |System|
-  :Create new Patient (without User account);
+  :(6) Create new Patient (without User account);
 endif
 |Receptionist|
-:Select doctor and shift;
-:Click "Book";
+:(7) Select doctor and shift, click "Book";
 |System|
-:Apply same booking transaction as UC9 with row-level lock;
+:(8) Apply booking transaction with row-level lock (same as UC9);
 if (booking succeeded?) then (yes)
-  :Create Appointment with status='WAITING';
-  :Optionally check-in immediately if patient is at counter;
+  :(9) Create Appointment, optionally check-in immediately;
   |Receptionist|
-  :Print appointment slip;
+  :(10) Print appointment slip;
   stop
 else (no)
   |Receptionist|
@@ -721,10 +653,10 @@ endif
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (3) | BR39 | **Patient Search Rules:**<br/>• `patientRepository.findByPhoneOrName([query])` returns top 10 matches.<br/>• If no match and [query] is a phone, allow quick-create. |
-| (5) | BR40 | **Walk-in Patient Creation Rules:**<br/>• Create Patient with `userId = null`, `createdBy = [receptionist.id]`.<br/>• Patient cannot self-login until they later register and link their account. |
+| (2) | BR39 | **Patient Search Rules:**<br/>• `patientRepository.findByPhoneOrName([query])` returns top 10 matches.<br/>• If no match and [query] is a phone, allow quick-create. |
+| (6) | BR40 | **Walk-in Patient Creation Rules:**<br/>• Create Patient with `userId = null`, `createdBy = [receptionist.id]`.<br/>• Patient cannot self-login until they later register and link their account. |
 | (8) | BR41 | **Booking Rules:** Same as BR35, but status can be set directly to 'CHECKED_IN' if Receptionist confirms patient presence. |
-| (9) | BR42 | **Print Rules:** Generate PDF slip with `pdfkit` containing appointment code, doctor name, shift time, queue number. |
+| (10) | BR42 | **Print Rules:** Generate PDF slip with `pdfkit` containing appointment code, doctor name, shift time, queue number. |
 
 ---
 
@@ -744,29 +676,23 @@ endif
 @startuml
 |User|
 start
-:Open appointment detail page;
-:Click "Cancel";
+:(1) Open appointment detail page;
+:(2) Click "Cancel";
 |System|
-:Show confirmation dialog;
+:(3) Show confirmation dialog;
 |User|
 if (confirm?) then (no)
   stop
 else (yes)
 endif
 |System|
-:Verify ownership (if Patient, must own this appointment);
-:AppointmentStateMachine.validateTransition(current, CANCELLED);
-if (transition valid?) then (yes)
-  :Begin transaction;
-  :Update Appointment.status = 'CANCELLED';
-  :Update Appointment.cancelledAt = now();
-  :Update Appointment.cancellationReason = [reason];
-  :Commit;
-  :Emit AppointmentCancelled event;
-  :Notification sent to patient and doctor;
-  :Audit log entry inserted;
+:(4) Verify ownership (if Patient, must own this appointment);
+:(5) Apply cancellation policy check (late cancellation count);
+if ((6) AppointmentStateMachine allows WAITING|CHECKED_IN → CANCELLED?) then (yes)
+  :(7) Update Appointment.status = 'CANCELLED', cancelledAt, reason;
+  :(8) Emit AppointmentCancelled event (notification + audit log);
   |User|
-  :Show success message;
+  :(9) Show success message;
   stop
 else (no)
   |User|
@@ -780,8 +706,8 @@ endif
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (3) | BR43 | **Ownership Check:** If `req.user.roleId == PATIENT`, ensure `appointment.patientId == req.user.patientId`. Else, return 403 with MSG 15. |
-| (4) | BR44 | **State Machine Check:** Use `AppointmentStateMachine.canTransition(current, 'CANCELLED')`. Allowed from WAITING and CHECKED_IN. Not allowed from IN_PROGRESS, COMPLETED, NO_SHOW. |
+| (4) | BR43 | **Ownership Check:** If `req.user.roleId == PATIENT`, ensure `appointment.patientId == req.user.patientId`. Else, return 403 with MSG 15. |
+| (6) | BR44 | **State Machine Check:** Use `AppointmentStateMachine.canTransition(current, 'CANCELLED')`. Allowed from WAITING and CHECKED_IN. Not allowed from IN_PROGRESS, COMPLETED, NO_SHOW. |
 | (5) | BR45 | **Cancellation Policy Rules:**<br/>• If cancelled < 2 hours before shift start, increment `patient.lateCancellationCount`.<br/>• If `patient.lateCancellationCount >= 3` within 30 days, flag patient for staff review (does NOT auto-ban). |
 
 ---
@@ -802,21 +728,17 @@ endif
 @startuml
 |User|
 start
-:Open appointment to reschedule;
-:Select new doctor and shift;
-:Click "Reschedule";
+:(1) Open appointment to reschedule;
+:(2) Select new doctor and shift, click "Reschedule";
 |System|
-:Begin transaction;
-:SELECT old DoctorShift FOR UPDATE;
-:SELECT new DoctorShift FOR UPDATE (in deterministic order by id to prevent deadlock);
-:Count active appointments in new shift;
+:(3) Check rescheduledCount < 3;
+:(4) Begin transaction, lock old and new DoctorShift in deterministic order (by id ascending);
+:(5) Count active appointments in new shift;
 if (new shift has space and not ended?) then (yes)
-  :Update Appointment.doctorShiftId, doctorId, workDate;
-  :Update Appointment.rescheduledCount += 1;
-  :Commit;
-  :Notify both old and new doctors;
+  :(6) Update Appointment.doctorShiftId, doctorId, workDate, rescheduledCount += 1;
+  :(7) Commit and notify both old and new doctors;
   |User|
-  :Show success;
+  :(8) Show success;
   stop
 else (no)
   :Rollback;
@@ -831,8 +753,8 @@ endif
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (3) | BR46 | **Deadlock Prevention:** Always lock the DoctorShift rows in ascending order of `id` (lower id first) to prevent deadlock when multiple users reschedule simultaneously. |
-| (4) | BR47 | **Reschedule Limit:** If `appointment.rescheduledCount >= 3`, deny with MSG 61 ("Maximum reschedules reached"). |
+| (3) | BR47 | **Reschedule Limit:** If `appointment.rescheduledCount >= 3`, deny with MSG 61 ("Maximum reschedules reached"). |
+| (4) | BR46 | **Deadlock Prevention:** Always lock the DoctorShift rows in ascending order of `id` (lower id first) to prevent deadlock when multiple users reschedule simultaneously. |
 
 ---
 
@@ -852,27 +774,23 @@ endif
 @startuml
 |Receptionist|
 start
-:Search appointment by code or patient phone;
+:(1) Search appointment by code or patient phone;
 |System|
-:Display appointment details;
+:(2) Display appointment details;
 |Receptionist|
-:Click "Check-in";
+:(3) Click "Check-in";
 |System|
-:Begin transaction;
-:SELECT Appointment FOR UPDATE;
-:AppointmentStateMachine.validate(WAITING → CHECKED_IN);
-if (transition valid?) then (yes)
-  :Update Appointment.status = 'CHECKED_IN', checkedInAt = now;
-  :Create Visit (appointmentId, patientId, doctorId, checkInTime=now, status='IN_PROGRESS');
-  :Assign queue number for the day;
-  :Commit;
-  :Notify the doctor that a patient has checked in;
+:(4) Check time window (shift.startTime - 60 min to shift.endTime + 30 min);
+:(5) Begin transaction, SELECT Appointment FOR UPDATE, validate state transition;
+if (WAITING → CHECKED_IN allowed?) then (yes)
+  :(6) Update Appointment.status = 'CHECKED_IN';
+  :(7) Create Visit, assign queue number, commit, notify doctor;
   |Receptionist|
-  :Display queue number and direct patient to waiting area;
+  :(8) Display queue number and direct patient to waiting area;
   stop
 else (no)
   |Receptionist|
-  :Show error (e.g. already checked in, or cancelled);
+  :Show error (already checked in, or cancelled);
   stop
 endif
 @enduml
@@ -904,29 +822,23 @@ endif
 @startuml
 |Doctor|
 start
-:Open visit from "My Today's Visits" list;
+:(1) Open visit from "My Today's Visits" list;
 |System|
-:Display Visit form with patient history;
+:(2) Verify ownership (visit.doctorId == req.user.doctorId);
+:(3) Display Visit form with patient history;
 |Doctor|
-:Record symptoms (free text);
-:Record vital signs (bloodPressure, heartRate, temperature, weight, height);
-:Select disease category from dropdown;
-:Write diagnosis;
-:Optionally upload symptom images;
-:Click "Save";
+:(4) Record symptoms, vital signs, disease category, diagnosis;
+:(5) Optionally upload symptom images;
+:(6) Click "Save";
 |System|
-:Sanitize HTML in text fields with dompurify;
-:Validate vital signs ranges;
+:(7) Sanitize HTML in text fields with dompurify;
+:(8) Validate vital signs ranges;
 if (valid?) then (yes)
-  if (images uploaded?) then (yes)
-    :Validate each ≤ 10MB and MIME type;
-    :Save to uploads/visits/{visitId}/;
-  else
-  endif
-  :Update Visit table;
-  :Audit log entry inserted;
+  :(9) Validate images (size, MIME) and save to uploads/visits/{visitId}/;
+  :(10) Update Visit table;
+  :(11) Audit log entry inserted;
   |Doctor|
-  :Show "Saved" message (auto-save also available);
+  :Show "Saved" message;
   stop
 else (no)
   |Doctor|
@@ -940,10 +852,10 @@ endif
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (4) | BR51 | **Ownership Check:** `visit.doctorId == req.user.doctorId`. Else, return 403 with MSG 15. |
+| (2) | BR51 | **Ownership Check:** `visit.doctorId == req.user.doctorId`. Else, return 403 with MSG 15. |
 | (8) | BR52 | **Vital Signs Validation:**<br/>• bloodPressureSystolic ∈ [50, 250]<br/>• bloodPressureDiastolic ∈ [30, 150]<br/>• heartRate ∈ [30, 220]<br/>• temperature ∈ [30.0, 45.0]<br/>• weight ∈ [0.5, 500]<br/>• height ∈ [20, 250].<br/>• Out-of-range values prompt for confirmation, not blocked. |
-| (9) | BR53 | **HTML Sanitization:** Apply `DOMPurify.sanitize()` to [symptoms], [diagnosis] fields to prevent stored XSS. |
-| (10) | BR54 | **Image Upload Rules:** Max 10MB per file, MIME ∈ {image/jpeg, image/png, image/webp}, max 5 images per visit. |
+| (7) | BR53 | **HTML Sanitization:** Apply `DOMPurify.sanitize()` to [symptoms], [diagnosis] fields to prevent stored XSS. |
+| (9) | BR54 | **Image Upload Rules:** Max 10MB per file, MIME ∈ {image/jpeg, image/png, image/webp}, max 5 images per visit. |
 | (11) | BR55 | **Audit Rules:** Captures old values of diagnosis and vitals for full audit trail. |
 
 ---
@@ -964,31 +876,25 @@ endif
 @startuml
 |Doctor|
 start
-:Click "Create Prescription";
+:(1) Click "Create Prescription";
 |System|
-:Display prescription form with medicine search;
+:(2) Display prescription form with medicine search;
 |Doctor|
 repeat
-  :Search medicine by name or code;
+  :(3) Search medicine by name or code;
   |System|
-  :Show matching active medicines from inventory;
+  :(4) Show matching active medicines;
   |Doctor|
-  :Select medicine;
-  :Enter dosage, frequency, duration, instruction;
-repeat while (more medicines?)
-:Click "Save Prescription";
+  :(5) Select medicine and enter dosage, frequency, duration, instruction;
+repeat while ((6) more medicines?)
+:(7) Click "Save Prescription";
 |System|
-:Begin transaction;
-:Validate each medicine is active and in stock (warning only);
-:Generate prescriptionCode;
-:Insert Prescription;
-for each item: Insert PrescriptionDetail;
-:Commit;
-:Emit PrescriptionCreated event;
-:Notification sent to patient;
+:(8) Begin transaction;
+:(9) Validate each medicine is active and check stock (warning only);
+:(10) Generate prescriptionCode and insert Prescription + PrescriptionDetail;
+:(11) Commit, emit PrescriptionCreated event, notify patient;
 |Doctor|
-:Show success message;
-:Optionally print prescription PDF;
+:(12) Show success and optionally print prescription PDF;
 stop
 @enduml
 ```
@@ -998,9 +904,9 @@ stop
 | Activity | BR Code | Description |
 | --- | --- | --- |
 | (4) | BR56 | **Medicine Search Rules:**<br/>• `medicineRepository.searchByName([q])` with `WHERE name LIKE %?% AND isActive = true`.<br/>• Limit 20 results, ordered by relevance. |
-| (7) | BR57 | **Prescription Detail Rules:**<br/>• [dosage] required, e.g. "1 tablet"<br/>• [frequency] required, e.g. "3 times/day"<br/>• [duration] required, e.g. "7 days"<br/>• [instruction] optional, e.g. "after meal". |
-| (10) | BR58 | **Stock Warning:** If `medicine.stock < quantity_needed`, show warning but allow saving (patient may buy medicine elsewhere). |
-| (11) | BR59 | **Code Generation:** `prescriptionCode = 'RX-' + YYYYMMDD + '-' + 5_digit_sequence`. |
+| (5) | BR57 | **Prescription Detail Rules:**<br/>• [dosage] required, e.g. "1 tablet"<br/>• [frequency] required, e.g. "3 times/day"<br/>• [duration] required, e.g. "7 days"<br/>• [instruction] optional, e.g. "after meal". |
+| (9) | BR58 | **Stock Warning:** If `medicine.stock < quantity_needed`, show warning but allow saving (patient may buy medicine elsewhere). |
+| (10) | BR59 | **Code Generation:** `prescriptionCode = 'RX-' + YYYYMMDD + '-' + 5_digit_sequence`. |
 
 ---
 
@@ -1020,22 +926,21 @@ stop
 @startuml
 |Admin|
 start
-:Open Medicine list;
-:Click "Add Medicine" or select to edit;
+:(1) Open Medicine list;
+:(2) Click "Add Medicine" or select to edit;
 |System|
-:Display Medicine form;
+:(3) Display Medicine form;
 |Admin|
-:Fill in: name, code, unit, sellingPrice, category, description;
+:(4) Fill in: name, code, unit, sellingPrice, category, description;
 :Click "Save";
 |System|
-:Validate inputs;
-if (valid?) then (yes)
-  if (create?) then (yes)
-    :Insert Medicine with stock=0, isActive=true;
+if ((5) inputs valid?) then (yes)
+  if (create mode?) then (yes)
+    :(6) Insert Medicine with stock=0, isActive=true;
   else
     :Update fields;
   endif
-  :Audit log entry inserted;
+  :(7) Audit log entry inserted;
   |Admin|
   :Show success;
   stop
@@ -1051,8 +956,8 @@ endif
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (4) | BR60 | **Validate Rules:** [name] not empty and unique, [code] unique, [sellingPrice] > 0, [unit] ∈ {viên, vỉ, hộp, lọ, ống, ml, gói}. |
-| (5) | BR61 | **Stock Initialization:** New medicine starts with `stock = 0`. Stock can only be incremented via UC17 (Import). |
+| (5) | BR60 | **Validate Rules:** [name] not empty and unique, [code] unique, [sellingPrice] > 0, [unit] ∈ {viên, vỉ, hộp, lọ, ống, ml, gói}. |
+| (6) | BR61 | **Stock Initialization:** New medicine starts with `stock = 0`. Stock can only be incremented via UC17 (Import). |
 
 ---
 
@@ -1072,26 +977,19 @@ endif
 @startuml
 |Admin|
 start
-:Click "New Import";
+:(1) Click "New Import";
 |System|
-:Display import form;
+:(2) Display import form;
 |Admin|
-:Fill supplier info, importDate;
-repeat
-  :Add line item (medicine, quantity, costPrice, expiryDate, batchNumber);
-repeat while (more items?)
+:(3) Fill supplier info, importDate;
+:(4) Add line items (medicine, quantity, costPrice, expiryDate, batchNumber);
 :Click "Save Import";
 |System|
-:Begin transaction;
-:Validate each item: medicine exists, quantity > 0, expiryDate > today + 30 days;
+:(5) Begin transaction, validate each item (expiry, quantity);
 if (all valid?) then (yes)
-  :Insert MedicineImport header;
-  for each item:
-    :Insert MedicineImportDetail;
-    :UPDATE Medicine SET stock = stock + quantity WHERE id = ?;
-  endfor
-  :Commit;
-  :Audit log;
+  :(6) Insert MedicineImport header and details, increment Medicine.stock atomically;
+  :(7) Commit transaction, record costPrice for margin reports;
+  :(8) Audit log;
   |Admin|
   :Show success;
   stop
@@ -1130,43 +1028,27 @@ endif
 @startuml
 |Receptionist|
 start
-:Select a completed visit;
+:(1) Select a completed visit;
 |System|
-:Display visit summary with prescription items;
+:(2) Display visit summary with prescription items (mark out-of-stock);
 |Receptionist|
-:Confirm consultation fee;
-:For each prescribed medicine, choose to include in invoice or not;
-:Click "Create Invoice";
+:(3) Confirm consultation fee and select medicines to include;
+:(4) Click "Create Invoice";
 |System|
-:Begin transaction;
-:SELECT Visit FOR UPDATE;
-if (visit.status == 'COMPLETED' and not invoiced?) then (yes)
-  :Generate invoiceCode;
-  :Insert Invoice with status='PENDING', total=0;
-  :Insert InvoiceItem (type='CONSULTATION', amount=fee);
-  for each medicine item:
-    :UPDATE Medicine SET stock = stock - qty WHERE id=? AND stock >= qty;
-    if (affectedRows == 1?) then (yes)
-      :Insert MedicineExport (invoiceId, medicineId, qty, price, exportDate);
-      :Insert InvoiceItem (type='MEDICINE', medicineId, qty, unitPrice, subtotal);
-    else (no)
-      :Throw STOCK_INSUFFICIENT;
-    endif
-  endfor
-  :UPDATE Invoice SET total = sum(items);
-  :VisitStateMachine: COMPLETED → INVOICED;
-  :UPDATE Visit SET status = 'INVOICED';
-  :Commit;
-  :Emit InvoiceCreated event;
-  :Notification sent to patient;
-  :Audit log entry inserted;
+:(5) Begin transaction, SELECT Visit FOR UPDATE;
+if (visit COMPLETED and not invoiced?) then (yes)
+  :(6) Generate invoiceCode, insert Invoice header (status PENDING);
+  :(7) For each medicine: conditional UPDATE stock, insert MedicineExport + InvoiceItem (atomic);
+  :(8) Apply pricing (consultation fee, medicine snapshot price);
+  :(9) UPDATE Invoice.total, transition Visit COMPLETED → INVOICED via state machine;
+  :(10) Commit, emit InvoiceCreated event, audit log;
   |Receptionist|
-  :Display invoice with print option;
+  :(11) Display invoice with print option;
   stop
 else (no)
   :Rollback;
   |Receptionist|
-  :Show error (already invoiced or invalid state);
+  :Show error (already invoiced, stock insufficient, or invalid state);
   stop
 endif
 @enduml
@@ -1176,11 +1058,11 @@ endif
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (4) | BR65 | **Pre-fetch Rules:** Display prescription items with current stock levels and selling prices. Mark out-of-stock items with warning. |
+| (2) | BR65 | **Pre-fetch Rules:** Display prescription items with current stock levels and selling prices. Mark out-of-stock items with warning. |
 | (7) | BR66 | **Atomic Transaction Rules (CRITICAL):**<br/>• Entire flow wrapped in `sequelize.transaction()`.<br/>• Visit row locked with `SELECT ... FOR UPDATE`.<br/>• Stock decrement uses conditional `UPDATE ... WHERE stock >= qty` to prevent over-deduction without explicit lock.<br/>• If `affectedRows == 0`, throw `STOCK_INSUFFICIENT` (MSG 63) and rollback entire transaction. |
-| (8) | BR67 | **Invoice Code:** `invoiceCode = 'INV-' + YYYYMMDD + '-' + 5_digit_sequence`. |
-| (10) | BR68 | **Pricing Rules:** Consultation fee comes from `SystemSettings.consultation_fee_default` or doctor-specific override. Medicine price comes from `Medicine.sellingPrice` at time of invoice (snapshot stored in InvoiceItem.unitPrice). |
-| (12) | BR69 | **State Machine:** Use `VisitStateMachine.validateTransition(COMPLETED, INVOICED)`. |
+| (6) | BR67 | **Invoice Code:** `invoiceCode = 'INV-' + YYYYMMDD + '-' + 5_digit_sequence`. |
+| (8) | BR68 | **Pricing Rules:** Consultation fee comes from `SystemSettings.consultation_fee_default` or doctor-specific override. Medicine price comes from `Medicine.sellingPrice` at time of invoice (snapshot stored in InvoiceItem.unitPrice). |
+| (9) | BR69 | **State Machine:** Use `VisitStateMachine.validateTransition(COMPLETED, INVOICED)`. |
 
 ---
 
@@ -1200,36 +1082,30 @@ endif
 @startuml
 |Receptionist|
 start
-:Open invoice;
-:Click "Record Payment";
+:(1) Open invoice and click "Record Payment";
 |System|
-:Display payment form;
+:(2) Display payment form;
 |Receptionist|
-:Enter payment method (CASH | BANK_TRANSFER | CARD);
-:Enter amount paid;
-:(Optional) enter reference number for bank transfer;
-:Click "Confirm";
+:(3) Enter payment method, amount, optional reference number;
+:(4) Click "Confirm";
 |System|
-:Begin transaction;
-:SELECT Invoice FOR UPDATE;
-:Calculate alreadyPaid = SUM(Payment.amount WHERE invoiceId=?);
-if (alreadyPaid + newAmount > invoice.total?) then (yes)
-  :Show "Overpayment not allowed" error;
-  :Rollback;
+:(5) Validate payment method ∈ allowed list;
+:(6) Begin transaction, SELECT Invoice FOR UPDATE;
+:(7) Validate amount (no overpayment);
+if (valid?) then (yes)
+  :(8) Insert Payment (invoiceId, amount, method, receivedBy, paidAt);
+  :(9) Update Invoice status (PAID or PARTIALLY_PAID) via state machine;
+  :(10) Commit transaction;
+  :(11) Print payment receipt;
+  |Receptionist|
+  :(12) Hand receipt to patient;
   stop
 else (no)
+  :Rollback;
+  |Receptionist|
+  :Show overpayment error;
+  stop
 endif
-:Insert Payment (invoiceId, amount, method, receivedBy=receptionist.id, paidAt=now);
-if (alreadyPaid + newAmount == invoice.total?) then (yes)
-  :UPDATE Invoice SET status = 'PAID', paidAt = now;
-else (no)
-  :UPDATE Invoice SET status = 'PARTIALLY_PAID';
-endif
-:Commit;
-:Print payment receipt;
-|Receptionist|
-:Hand receipt to patient;
-stop
 @enduml
 ```
 
@@ -1237,9 +1113,9 @@ stop
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (4) | BR70 | **Payment Method Validation:** [method] ∈ {CASH, BANK_TRANSFER, CARD, MOMO, VNPAY, ZALOPAY}. CARD/online methods marked as "not yet implemented" if gateway not connected. |
+| (5) | BR70 | **Payment Method Validation:** [method] ∈ {CASH, BANK_TRANSFER, CARD, MOMO, VNPAY, ZALOPAY}. CARD/online methods marked as "not yet implemented" if gateway not connected. |
 | (7) | BR71 | **Amount Validation:** [amount] > 0 AND `alreadyPaid + amount <= invoice.total`. Else show MSG 64. |
-| (10) | BR72 | **State Transition:** Use `InvoiceStateMachine`: PENDING → PARTIALLY_PAID → PAID. PAID is terminal except for REFUNDED. |
+| (9) | BR72 | **State Transition:** Use `InvoiceStateMachine`: PENDING → PARTIALLY_PAID → PAID. PAID is terminal except for REFUNDED. |
 
 ---
 
@@ -1259,40 +1135,27 @@ stop
 @startuml
 |Admin|
 start
-:Open invoice;
-:Click "Issue Refund";
+:(1) Open invoice and click "Issue Refund";
 |System|
-:Display refund form with invoice items;
+:(2) Display refund form with refundable items only;
 |Admin|
-:Select items to refund;
-:For medicine items, choose whether to return to stock;
-:Enter refund reason;
-:Click "Confirm";
+:(3) Select items, choose stock return option, enter reason;
+:(4) Click "Confirm";
 |System|
-:Show confirmation dialog (Refer MSG 1);
+:(5) Show confirmation dialog (MSG 1);
 |Admin|
 if (confirmed?) then (no)
   stop
 else (yes)
 endif
 |System|
-:Begin transaction;
-:Calculate refundAmount = sum of selected items;
-:Insert Refund (invoiceId, amount, reason, processedBy=admin.id);
-for each medicine item to return:
-  :UPDATE Medicine SET stock = stock + qty;
-  :Update MedicineExport.returnedQty;
-endfor
-if (refundAmount == invoice.total?) then (yes)
-  :UPDATE Invoice SET status = 'REFUNDED';
-else
-  :UPDATE Invoice SET status = 'PARTIALLY_REFUNDED';
-endif
-:Commit;
-:Audit log;
-:Send refund notification to patient;
+:(6) Begin transaction, validate refund amount ≤ paid - already refunded;
+:(7) Insert Refund (invoiceId, amount, reason, processedBy);
+:(8) For each medicine item to return: increment Medicine.stock, update MedicineExport.returnedQty;
+:(9) Update Invoice.status (REFUNDED or PARTIALLY_REFUNDED);
+:(10) Commit, audit log, notify patient;
 |Admin|
-:Print refund receipt;
+:(11) Print refund receipt;
 stop
 @enduml
 ```
@@ -1301,9 +1164,9 @@ stop
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (5) | BR73 | **Refundable Items:** Only items not yet consumed (e.g. medicines patient hasn't picked up). Consultation fee usually non-refundable unless visit was cancelled. |
-| (8) | BR74 | **Refund Amount:** `refundAmount <= total paid - already refunded`. Else error MSG 65. |
-| (10) | BR75 | **Stock Restoration:** Only if medicine package is unopened and within 7 days of original export. Older returns require Admin override. |
+| (2) | BR73 | **Refundable Items:** Only items not yet consumed (e.g. medicines patient hasn't picked up). Consultation fee usually non-refundable unless visit was cancelled. |
+| (6) | BR74 | **Refund Amount:** `refundAmount <= total paid - already refunded`. Else error MSG 65. |
+| (8) | BR75 | **Stock Restoration:** Only if medicine package is unopened and within 7 days of original export. Older returns require Admin override. |
 
 ---
 
@@ -1323,31 +1186,22 @@ stop
 @startuml
 |Admin|
 start
-:Select target month (e.g. 2026-04);
-:Click "Generate Payroll";
+:(1) Select target month and click "Generate Payroll";
 |System|
-:Show confirmation;
+:(2) Show confirmation;
 |Admin|
 if (confirmed?) then (no)
   stop
 else (yes)
 endif
 |System|
-:Begin transaction;
-:Fetch all active Employees;
-for each employee:
-  :Aggregate Attendance: workDays, lateMinutes, overtimeHours for the month;
-  :Calculate grossSalary = baseSalary;
-  :Apply deductions = lateMinutes * lateRate / 60;
-  :Apply bonus = overtimeHours * overtimeRate;
-  :netSalary = grossSalary + bonus - deductions;
-  :Insert Payroll (employeeId, month, gross, deductions, bonus, net, status='DRAFT');
-endfor
-:Commit;
+:(3) Begin transaction, fetch all active Employees;
+:(4) Check for duplicate Payroll (same employee + month);
+:(5) For each employee: aggregate Attendance, calculate gross/deductions/bonus/net;
+:(6) Insert Payroll records with status='DRAFT';
+:(7) Commit transaction;
 |Admin|
-:Review and approve each payroll;
-:Set status to 'APPROVED';
-:Notify employees;
+:(8) Review and approve each payroll, set status='APPROVED', notify employees;
 stop
 @enduml
 ```
@@ -1357,7 +1211,7 @@ stop
 | Activity | BR Code | Description |
 | --- | --- | --- |
 | (4) | BR76 | **Duplicate Check:** If Payroll for the same employee + month already exists with status != 'DRAFT', skip with warning. |
-| (7) | BR77 | **Calculation:** `lateRate` and `overtimeRate` configurable in SystemSettings. Default lateRate = baseSalary/22/8/60 (per minute). Default overtimeRate = baseSalary/22/8 * 1.5 (per hour). |
+| (5) | BR77 | **Calculation:** `lateRate` and `overtimeRate` configurable in SystemSettings. Default lateRate = baseSalary/22/8/60 (per minute). Default overtimeRate = baseSalary/22/8 * 1.5 (per hour). |
 | (8) | BR78 | **Approval Workflow:** Payroll starts in DRAFT. Admin must explicitly approve to lock it. Once APPROVED, becomes immutable. |
 
 ---
@@ -1378,22 +1232,19 @@ stop
 @startuml
 |Trigger|
 start
-if (manual or cron?) then (manual)
+if ((1) manual or cron?) then (manual)
   |Admin|
-  :Select target week;
-  :Click "Generate";
+  :(2) Select target week and click "Generate";
 else (cron)
   |System|
-  :Cron fires every Sunday 23:00;
+  :(3) Cron fires every Sunday 23:00 (leader instance only);
 endif
 |System|
-:For each day in target week (Mon-Sun):
-:    For each ShiftTemplate (morning, afternoon, evening):
-:        Select doctors based on availability and rotation policy;
-:        Insert DoctorShift (doctorId, shiftId, workDate, maxSlots);
-:Log generation result;
+:(4) For each day × each ShiftTemplate, select doctors by rotation policy;
+:(5) Insert DoctorShift records with default maxSlots from SystemSettings;
+:(6) Log generation result;
 |Admin|
-:Review and adjust assignments;
+:(7) Review and adjust assignments;
 stop
 @enduml
 ```
@@ -1402,7 +1253,7 @@ stop
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (1) | BR79 | **Cron Schedule:** `0 23 * * 0` (every Sunday at 23:00). Only the leader instance executes (when `ENABLE_SCHEDULER=true`). |
+| (3) | BR79 | **Cron Schedule:** `0 23 * * 0` (every Sunday at 23:00). Only the leader instance executes (when `ENABLE_SCHEDULER=true`). |
 | (4) | BR80 | **Rotation Policy:** Round-robin within specialty. Avoid scheduling same doctor for 2 consecutive shifts on same day. Honor doctor's preferred days (stored in Doctor.preferredDays). |
 | (5) | BR81 | **Default maxSlots:** Read from `SystemSettings.default_slots_per_shift` (default 15). |
 
@@ -1424,29 +1275,21 @@ stop
 @startuml
 |Employee|
 start
-:Open Attendance page;
+:(1) Open Attendance page;
 |System|
-:Display today's status (not clocked in / clocked in / clocked out);
+:(2) Display today's status;
 |Employee|
+:(3) Choose action: Clock In or Clock Out;
+|System|
 if (action == "Clock In"?) then (yes)
-  |System|
-  if (already clocked in today?) then (yes)
-    |Employee|
-    :Show "Already clocked in" error;
-    stop
-  else (no)
-  endif
-  :Insert Attendance (employeeId, date=today, clockInTime=now);
-  :If now > scheduled start + 15 min, mark lateMinutes;
+  :(4) Check duplicate (unique constraint on employeeId + date);
+  :(5) Insert Attendance with clockInTime, calculate lateMinutes;
 else (clock out)
-  |System|
-  :Fetch today's Attendance;
-  :Update clockOutTime = now;
-  :Calculate workMinutes;
-  :If workMinutes > scheduled + 30, mark overtime;
+  :(6) Fetch today's Attendance, update clockOutTime;
+  :(7) Calculate workMinutes and overtimeMinutes;
 endif
 |Employee|
-:Show updated status;
+:(8) Show updated status;
 stop
 @enduml
 ```
@@ -1455,7 +1298,7 @@ stop
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (3) | BR82 | **Duplicate Clock-in Prevention:** Use unique constraint `(employeeId, date)` on Attendance table. |
+| (4) | BR82 | **Duplicate Clock-in Prevention:** Use unique constraint `(employeeId, date)` on Attendance table. |
 | (5) | BR83 | **Late Calculation:** `lateMinutes = max(0, clockInTime - scheduledStart - 15_min_grace)`. |
 | (7) | BR84 | **Overtime Calculation:** `overtimeMinutes = max(0, workMinutes - scheduledDuration - 30_min_grace)`. |
 
@@ -1477,20 +1320,18 @@ stop
 @startuml
 |Admin|
 start
-:Open Audit Log page;
+:(1) Open Audit Log page;
 |System|
-:Display filter form (date range, user, tableName, action);
+:(2) Display filter form;
 |Admin|
-:Set filters;
-:Click "Search";
+:(3) Set filters (date range, user, tableName, action);
+:(4) Click "Search";
 |System|
-:Build query with filters;
-:Apply pagination (page, limit=50);
-:Fetch from AuditLog table;
-:Return paged results;
+:(5) Validate filter rules (date range ≤ 90 days, etc.);
+:(6) Build query and apply pagination (default limit=50, max 200);
+:(7) Fetch from AuditLog table and return paged results;
 |Admin|
-:View list;
-:Click an entry to see old vs new values diff;
+:(8) View list and click entry to see old vs new values diff;
 stop
 @enduml
 ```
@@ -1499,7 +1340,7 @@ stop
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (4) | BR85 | **Filter Rules:** [dateFrom, dateTo] (max 90-day range), [userId], [tableName], [action] ∈ {CREATE, UPDATE, DELETE, VIEW, EXPORT}. |
+| (5) | BR85 | **Filter Rules:** [dateFrom, dateTo] (max 90-day range), [userId], [tableName], [action] ∈ {CREATE, UPDATE, DELETE, VIEW, EXPORT}. |
 | (6) | BR86 | **Pagination:** Default page=1, limit=50, max limit=200. |
 | (8) | BR87 | **Diff Display:** Show oldValue and newValue as JSON, with diff highlighting (e.g. using `jsondiffpatch`). |
 
@@ -1521,27 +1362,21 @@ stop
 @startuml
 |Admin|
 start
-:Open Reports page;
-:Select report type (Revenue | Visits | Inventory | Payroll);
-:Set date range;
-:Select format (Excel | PDF);
-:Click "Generate";
+:(1) Open Reports page;
+:(2) Select report type, date range, format;
+:(3) Click "Generate";
 |System|
-:Validate inputs and permission;
-:Run aggregate queries on replica DB (if configured);
-:Build report data structure;
+:(4) Validate inputs (date range ≤ 12 months) and permission;
+:(5) Run aggregate queries (route to replica DB if configured);
+:(6) Build report data structure;
 if (format == Excel?) then (yes)
-  :Use exceljs to build workbook;
-  :Add header, data rows, summary rows;
-  :Stream file to client;
+  :(7) Build Excel workbook with exceljs;
 else (PDF)
-  :Use pdfkit to build PDF;
-  :Render charts using chartjs-node-canvas;
-  :Embed charts and tables;
-  :Stream file to client;
+  :(7) Build PDF with pdfkit;
 endif
+:(8) Stream file to client;
 |Admin|
-:Receive downloaded file;
+:(9) Receive downloaded file;
 stop
 @enduml
 ```
@@ -1551,9 +1386,9 @@ stop
 | Activity | BR Code | Description |
 | --- | --- | --- |
 | (4) | BR88 | **Date Range:** Max 12 months per report. If exceeded, show error MSG 66. |
-| (7) | BR89 | **Read Replica:** If `DB_REPLICA_URL` is configured, route aggregate queries to replica via Sequelize `useMaster: false`. |
-| (10) | BR90 | **Streaming:** For large reports (>5000 rows), use Excel streaming writer to avoid memory issues. |
-| (11) | BR91 | **Chart Generation:** Use chartjs-node-canvas to render PNG charts at 800x400, embed via `pdfkit.image()`. |
+| (5) | BR89 | **Read Replica:** If `DB_REPLICA_URL` is configured, route aggregate queries to replica via Sequelize `useMaster: false`. |
+| (8) | BR90 | **Streaming:** For large reports (>5000 rows), use Excel streaming writer to avoid memory issues. |
+| (7) | BR91 | **Chart Generation:** Use chartjs-node-canvas to render PNG charts at 800x400, embed via `pdfkit.image()`. |
 
 ---
 
@@ -1573,25 +1408,23 @@ stop
 @startuml
 |Admin|
 start
-:Open System Settings page;
+:(1) Open System Settings page;
 |System|
-:Display current settings (slots/shift, expiry threshold, consultation fee, notification config, etc.);
+:(2) Display current settings;
 |Admin|
-:Modify values;
-:Click "Save";
+:(3) Modify values according to settings schema;
+:(4) Click "Save";
 |System|
-:Show confirmation;
+:(5) Show confirmation;
 |Admin|
 if (confirmed?) then (no)
   stop
 else (yes)
 endif
 |System|
-:Validate each value type and range;
-if (valid?) then (yes)
-  :UPDATE SystemSettings;
-  :Invalidate in-process cache for SystemSettingsService;
-  :Audit log;
+if ((6) valid per settings schema?) then (yes)
+  :(7) UPDATE SystemSettings and invalidate in-process cache;
+  :(8) Audit log each key change separately;
   |Admin|
   :Show success;
   stop
@@ -1607,7 +1440,7 @@ endif
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (3) | BR92 | **Settings Schema:** Each setting has a defined key, type, validation rule. Examples:<br/>• `default_slots_per_shift` (int, 1-50)<br/>• `consultation_fee_default` (decimal, > 0)<br/>• `medicine_expiry_warning_days` (int, 1-180)<br/>• `late_cancellation_threshold_hours` (int, 1-72)<br/>• `notification_email_enabled` (boolean). |
+| (6) | BR92 | **Settings Schema:** Each setting has a defined key, type, validation rule. Examples:<br/>• `default_slots_per_shift` (int, 1-50)<br/>• `consultation_fee_default` (decimal, > 0)<br/>• `medicine_expiry_warning_days` (int, 1-180)<br/>• `late_cancellation_threshold_hours` (int, 1-72)<br/>• `notification_email_enabled` (boolean). |
 | (7) | BR93 | **Cache Invalidation:** Call `systemSettingsService.refreshCache()`. Wrapper has TTL of 60s; explicit invalidation makes change effective within 1 second. |
 | (8) | BR94 | **Audit Rules:** Each key change captured separately with old/new values. |
 
@@ -1629,20 +1462,20 @@ endif
 @startuml
 |Admin|
 start
-:Click "Enable Maintenance" or "Disable Maintenance";
+:(1) Click "Enable Maintenance" or "Disable Maintenance";
 |System|
-:Show strong confirmation dialog with banner preview;
+:(2) Show strong confirmation dialog with impact preview;
 |Admin|
 if (confirmed?) then (no)
   stop
 else (yes)
 endif
 |System|
-:UPDATE SystemSettings SET value=? WHERE key='maintenance_mode';
-:Invalidate in-process cache;
-:Audit log with action='TOGGLE_MAINTENANCE';
+:(3) UPDATE SystemSettings.maintenance_mode;
+:(4) Invalidate in-process cache (TTL ≤ 1s for maintenance flag);
+:(5) Audit log with action='TOGGLE_MAINTENANCE';
 |Admin|
-:Show success with current status;
+:(6) Show success with current status;
 stop
 
 note right
