@@ -31,6 +31,8 @@ import auditLogRoutes from "./modules/admin/auditLog.routes";
 import jobRoutes from "./modules/misc/job.routes";
 import systemRoutes from "./modules/admin/system.routes";
 import { checkMaintenance } from "./middlewares/maintenance.middlewares";
+import { sanitizeInput } from "./middlewares/sanitize.middlewares";
+import { cacheMiddleware } from "./middlewares/cache.middlewares";
 
 const rateLimitWindowMsEnv = Number(process.env.RATE_LIMIT_WINDOW_MS);
 const rateLimitMaxEnv = Number(process.env.RATE_LIMIT_MAX_REQUESTS);
@@ -93,6 +95,7 @@ app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 app.use(passport.initialize());
 
 
+app.use("/api", sanitizeInput);
 
 app.use("/api", checkMaintenance);
 

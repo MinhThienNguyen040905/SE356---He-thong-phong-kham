@@ -26,7 +26,7 @@
 | 6 | **ASR-PERF-01** | Low-latency Reads for Lists, Search and Dashboard | UT-PERF-01 | All list/search UCs (UC9 doctor list, UC25 reports) | 2.2.1 | 2.2.1, 7.1 | [Backend/src/middlewares/cache.middlewares.ts](Backend/src/middlewares/cache.middlewares.ts), [Backend/migrations/20250103000001-add-performance-indexes.js](Backend/migrations/20250103000001-add-performance-indexes.js), [Backend/migrations/20250104000001-add-additional-performance-indexes.js](Backend/migrations/20250104000001-add-additional-performance-indexes.js) | **Cache-aside**, **Database Indexing**, **Pagination** | GET /api/appointments với 10k bản ghi → đo P95 < 500ms qua Postman runner |
 | 7 | **ASR-PERF-02** | Resource Protection Under Burst Traffic | UT-PERF-02 | UC1 (login brute-force) | 2.2.2 | 2.2.2, 6.3 | [Backend/src/app.ts](Backend/src/app.ts) (express-rate-limit config), [Backend/src/middlewares/rateLimit.middlewares.ts](Backend/src/middlewares/rateLimit.middlewares.ts) | **Rate Limiting**, **Throttling** | `for i in {1..50}; do curl POST /api/auth/login; done` → request thứ ~10+ trả 429 Too Many Requests |
 | 8 | **ASR-DI-01** | **Concurrent Booking Consistency** ⭐ | UT-DI-01 | UC9, UC10, UC12 | 2.3.1 | 2.3.1, 4.2.1 | [Backend/src/modules/appointment/appointment.service.ts](Backend/src/modules/appointment/appointment.service.ts) (`createAppointmentService`), [Backend/src/utils/stateMachine.ts](Backend/src/utils/stateMachine.ts) (`AppointmentStateMachine`), [Backend/src/utils/codeGenerator.ts](Backend/src/utils/codeGenerator.ts) (`generateAppointmentCode`) | **Transaction Script**, **Pessimistic Locking** (SELECT FOR UPDATE), **State Machine**, **Code Generator** | Seed DB: DoctorShift còn 1 slot. Chạy 2 request concurrent qua `xargs -P 2`. 1 thành công (201), 1 fail (409 SLOTS_FULL) |
-| 9 | **ASR-DI-02** | **Atomic Financial Operations** ⭐ | UT-DI-02 | UC18, UC19, UC20 | 2.3.2 | 2.3.2, 4.2.4 | [Backend/src/modules/finance/invoice.service.ts](Backend/src/modules/finance/invoice.service.ts) (`createInvoice`), [Backend/src/modules/inventory/medicine.service.ts](Backend/src/modules/inventory/medicine.service.ts) (dispense logic) | **Transaction Script**, **Conditional Update** (UPDATE ... WHERE stock >= qty), **State Machine** (VisitStateMachine) | Tạo invoice với medicine số lượng > stock → cả invoice + medicine export đều rollback, Visit.status không đổi |
+| 9 | **ASR-DI-02** | **Atomic Financial Operations** ⭐ | UT-DI-02 | UC15, UC18, UC19, UC20 | 2.3.2 | 2.3.2, 4.2.4 | [Backend/src/modules/appointment/prescription.service.ts](Backend/src/modules/appointment/prescription.service.ts) (`createPrescription`, `updatePrescription` — biên transaction kê đơn + xuất kho), [Backend/src/modules/finance/invoice.service.ts](Backend/src/modules/finance/invoice.service.ts) (`createInvoiceFromVisit` — biên transaction tạo hóa đơn từ snapshot), [Backend/src/utils/stateMachine.ts](Backend/src/utils/stateMachine.ts) (VisitStateMachine) | **Transaction Script** (2 biên tách biệt), **Pessimistic Locking** (Medicine row trong prescription transaction), **State Machine** (VisitStateMachine), **Snapshot Pattern** (PrescriptionDetail giữ unitPrice/quantity cho InvoiceItem đọc lại) | **(a)** Kê đơn với số lượng > stock → INSUFFICIENT_STOCK, Prescription + Medicine.quantity + MedicineExport đều rollback. **(b)** Đã có đơn thuốc, tạo hóa đơn 2 lần cho cùng visit → lần 2 báo INVOICE_ALREADY_EXISTS, không sinh hóa đơn trùng. |
 | 10 | **ASR-DI-03** | Explicit State Machine for Business Entities | UT-DI-03 | UC11, UC12, UC13, UC14, UC18 | 2.3.3 | 2.3.3, 2.2 (mô tả) | [Backend/src/utils/stateMachine.ts](Backend/src/utils/stateMachine.ts) (`AppointmentStateMachine`, `VisitStateMachine`, `InvoiceStateMachine`) | **State Machine Pattern**, **Strategy** (per entity type) | Cố gọi API chuyển CANCELLED → COMPLETED → throw `INVALID_APPOINTMENT_STATE_TRANSITION` |
 | 11 | **ASR-DI-04** | Comprehensive Audit Trail | UT-DI-04 | All mutating UCs | 2.3.4 | 2.3.4, 6.5 | [Backend/src/middlewares/auditLog.middlewares.ts](Backend/src/middlewares/auditLog.middlewares.ts), [Backend/src/modules/admin/auditLog.service.ts](Backend/src/modules/admin/auditLog.service.ts), [Backend/src/models/AuditLog.ts](Backend/src/models/AuditLog.ts) | **Interceptor**, **Decorator** (auditCreate/Update/Delete wrappers), **Async Write** | Update bệnh nhân → query GET /api/audit-logs?recordId={id} → thấy entry với oldValue/newValue |
 | 12 | **ASR-AVL-01** | Background Job Isolation | UT-AVL-01 | UC22 (cron schedule generation), auto-no-show | 2.4.1 | 2.4.1, 4.2.5 (sequence) | [Backend/src/jobs/scheduler.ts](Backend/src/jobs/scheduler.ts), [Backend/src/jobs/autoNoShow.job.ts](Backend/src/jobs/autoNoShow.job.ts), [Backend/src/jobs/attendance.job.ts](Backend/src/jobs/attendance.job.ts), [Backend/src/jobs/medicineExpiryCheck.ts](Backend/src/jobs/medicineExpiryCheck.ts), [Backend/src/jobs/scheduleGenerationCron.ts](Backend/src/jobs/scheduleGenerationCron.ts) | **Scheduler**, **Try-Catch Wrapper**, (đề xuất tương lai: **Leader Election**) | Inject lỗi vào auto-no-show job → log thấy "[Scheduler] Auto no-show job failed:" nhưng API vẫn 200 OK |
@@ -71,18 +71,24 @@
 
 ---
 
-### ⭐ ASR-DI-02 — Atomic Financial Operations (tạo hóa đơn)
+### ⭐ ASR-DI-02 — Atomic Financial Operations (kê đơn + tạo hóa đơn)
 
-**Câu hỏi mẫu:** *"Tại sao việc tạo hóa đơn phải atomic? Implement thế nào?"*
+**Câu hỏi mẫu:** *"Tại sao việc kê đơn và tạo hóa đơn phải atomic? Implement thế nào?"*
 
 **Key points:**
-- Vì 1 hóa đơn động tới nhiều bảng: Invoice + InvoiceItem + MedicineExport + Medicine.stock + Visit.status.
-- Nếu không atomic, một bước fail → dữ liệu mâu thuẫn (hóa đơn ghi 10 viên nhưng kho chỉ trừ 8).
-- Tactic: Tất cả nằm trong **một transaction**.
-- Conditional UPDATE `UPDATE Medicine SET stock = stock - qty WHERE stock >= qty` để chống race condition mà không cần explicit lock cho Medicine.
-- Code: [invoice.service.ts](Backend/src/modules/finance/invoice.service.ts) hàm createInvoice.
-- Pattern: Transaction Script + Conditional Update + State Machine (VisitStateMachine COMPLETED → INVOICED).
-- Demo: Inject lỗi giữa loop tạo InvoiceItem → kiểm DB thấy Invoice không tồn tại, Medicine.stock không thay đổi, Visit.status vẫn COMPLETED.
+- Hệ thống chia luồng tài chính thành **2 biên transaction** theo vai trò nghiệp vụ:
+  - **Biên (a) – Prescription transaction** (bác sĩ kê đơn): atomic giữa Prescription + PrescriptionDetail + Medicine.quantity (trừ kho) + MedicineExport + Visit.status. Đây mới là nơi "động vào tồn kho".
+  - **Biên (b) – Invoice transaction** (lễ tân tạo hóa đơn): atomic giữa Invoice + InvoiceItem cho phí khám + InvoiceItem cho từng PrescriptionDetail (đọc snapshot unitPrice/quantity từ đơn).
+- Lý do chia: đảm bảo bác sĩ không kê vượt tồn kho ngay tại thời điểm khám (không thể "kê rồi mai tính"); hóa đơn chỉ là chứng từ tổng hợp.
+- Tactic biên (a): `sequelize.transaction({ isolationLevel: READ_COMMITTED })` + `Medicine.findByPk({ lock: t.LOCK.UPDATE })` cho mỗi medicine item, rồi check `quantity >= qty` và trừ.
+- Tactic biên (b): `sequelize.transaction()` đọc Visit + Prescription + Details, check `existingInvoice` để chống tạo trùng, sinh `invoiceCode` trong transaction.
+- Pattern: Transaction Script (×2) + Pessimistic Locking (Medicine row) + State Machine (VisitStateMachine) + Snapshot Pattern (PrescriptionDetail giữ giá tại thời điểm kê).
+- Code:
+  - [prescription.service.ts](Backend/src/modules/appointment/prescription.service.ts) hàm `createPrescription` (biên a) và `updatePrescription` (sửa đơn = phục hồi kho cũ + trừ kho mới + xóa InvoiceItem cũ — vẫn trong 1 transaction).
+  - [invoice.service.ts](Backend/src/modules/finance/invoice.service.ts) hàm `createInvoiceFromVisit` (biên b).
+- Demo:
+  - **(a)** Kê đơn với medicine số lượng > stock → throw `INSUFFICIENT_STOCK_*`. Kiểm DB: Prescription không tồn tại, Medicine.quantity không đổi, không có MedicineExport mới.
+  - **(b)** Tạo hóa đơn 2 lần cho cùng `visitId` → lần 2 báo `Invoice already exists for this visit`, không sinh hóa đơn trùng.
 
 ---
 
