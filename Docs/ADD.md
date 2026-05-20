@@ -149,12 +149,12 @@
 
 | Element | Statement |
 | --- | --- |
-| Stimulus | Bác sĩ kê đơn (xuất thuốc khỏi kho), lễ tân tạo hóa đơn cho lượt khám gồm nhiều mục (phí khám + các thuốc đã kê), ghi nhận thanh toán, hoặc xử lý hoàn tiền. |
+| Stimulus | Bác sĩ kê đơn thuốc (đồng thời xuất thuốc khỏi kho), lễ tân tạo hóa đơn cho lượt khám gồm phí khám và các mục thuốc đã kê, ghi nhận thanh toán, hoặc xử lý hoàn tiền. |
 | Stimulus source | Bác sĩ (kê đơn), Lễ tân, Admin (hóa đơn, thanh toán, hoàn tiền). |
-| Environment | Quá trình tạo / cập nhật chứng từ tài chính, có thể gặp lỗi giữa chừng. |
-| Artifact | Prescription module (kê đơn + xuất kho), Finance module (hóa đơn, thanh toán, hoàn tiền), Inventory module (Medicine.stock + MedicineExport), lớp persistence. |
-| Response | Hệ thống chia luồng nguyên tử thành **hai biên transaction** tách biệt theo trách nhiệm nghiệp vụ: (1) **Transaction kê đơn** (Prescription service) – tạo Prescription + PrescriptionDetail + trừ `Medicine.quantity` + tạo MedicineExport + cập nhật Visit.status thành EXAMINED, tất cả nằm trong cùng một transaction với row-level lock trên Medicine; (2) **Transaction tạo hóa đơn** (Finance service) – sinh `invoiceCode`, tạo Invoice + InvoiceItem cho khám + InvoiceItem cho từng PrescriptionDetail (đọc unitPrice/quantity đã chốt từ đơn thuốc), tất cả trong cùng một transaction. Hoàn tiền cũng nguyên tử với cập nhật trạng thái Invoice và phục hồi tồn kho khi đơn thuốc bị hủy. Khi cập nhật đơn thuốc (updatePrescription) đã có hóa đơn, transaction xóa các InvoiceItem MEDICINE cũ, phục hồi tồn kho cũ, trừ lại tồn kho mới và tạo InvoiceItem mới — toàn bộ trong một transaction. |
-| Response measure | 0 hóa đơn "mồ côi" hoặc tồn kho lệch trong test inject lỗi ở mỗi biên transaction. 100% giao dịch tài chính có log thành công / thất bại. Tồn kho không bao giờ âm dưới concurrency nhờ row-level lock trên Medicine. |
+| Environment | Quá trình tạo / cập nhật chứng từ y tế và tài chính, có thể gặp lỗi giữa chừng. |
+| Artifact | Prescription service, Finance service, Inventory service, lớp persistence. |
+| Response | Luồng nguyên tử được tách thành **hai biên transaction** theo trách nhiệm nghiệp vụ: (1) **Biên kê đơn** – cùng một transaction (mức cô lập READ COMMITTED) bao gọn việc tạo đơn thuốc, ghi từng mục đơn, trừ tồn kho thuốc (kèm row-level lock trên thực thể thuốc tương ứng), ghi nhận xuất kho và cập nhật trạng thái lượt khám sang trạng thái "đã khám"; (2) **Biên tạo hóa đơn** – một transaction khác bao gọn việc sinh mã hóa đơn, tạo hóa đơn, tạo các mục hóa đơn cho phí khám và cho từng mục đơn thuốc bằng cách đọc lại giá / số lượng đã được chốt ở biên kê đơn (snapshot), và chống tạo trùng cho cùng một lượt khám. Hoàn tiền nguyên tử với cập nhật trạng thái hóa đơn và phục hồi tồn kho khi đơn thuốc bị hủy. Khi sửa đơn thuốc đã sinh hóa đơn, transaction phục hồi tồn kho theo đơn cũ, trừ lại tồn kho theo đơn mới và đồng bộ các mục thuốc trên hóa đơn — tất cả trong cùng một transaction. |
+| Response measure | 0 hóa đơn "mồ côi" hoặc tồn kho lệch trong test inject lỗi ở mỗi biên transaction. 100% giao dịch tài chính có log thành công / thất bại. Tồn kho không bao giờ âm dưới concurrency nhờ row-level lock trên thực thể thuốc. |
 
 #### 2.3.3. ASR-DI-03 — Explicit State Machine for Business Entities
 
@@ -675,9 +675,9 @@ sequenceDiagram
 
 #### 3.5.2. Atomic prescription dispense + invoice creation (ASR-DI-02)
 
-Hệ thống có **hai biên transaction tách biệt**: (a) kê đơn + xuất kho do bác sĩ kích hoạt, (b) tạo hóa đơn do lễ tân kích hoạt sau khi đơn thuốc đã chốt. Mỗi biên là một transaction nguyên tử.
+Luồng tài chính tách thành **hai biên transaction**: (a) kê đơn kèm xuất kho do bác sĩ kích hoạt, (b) tạo hóa đơn do lễ tân kích hoạt sau khi đơn thuốc đã chốt. Mỗi biên là một transaction nguyên tử độc lập.
 
-##### 3.5.2.a. Prescription transaction (dispense from stock)
+##### 3.5.2.a. Prescription transaction (kê đơn + xuất kho)
 
 ```mermaid
 sequenceDiagram
@@ -687,30 +687,30 @@ sequenceDiagram
     participant RX as Prescription Service
     participant DB as Relational DB
 
-    D->>API: Create prescription (visitId, items)
-    API->>RX: Create prescription (input, doctorId)
+    D->>API: Yêu cầu kê đơn cho lượt khám
+    API->>RX: Tạo đơn thuốc (lượt khám, danh sách mục)
     RX->>DB: Begin transaction (READ COMMITTED)
-    RX->>DB: Insert Prescription header
-    loop for each medicine item
-        RX->>DB: SELECT Medicine FOR UPDATE
-        alt active & stock >= qty
-            RX->>DB: UPDATE Medicine SET quantity = quantity - qty
-            RX->>DB: Insert PrescriptionDetail (snapshot name/unit/unitPrice)
-            RX->>DB: Insert MedicineExport (reason = PRESCRIPTION_{code})
-        else inactive / insufficient stock
+    RX->>DB: Tạo đơn thuốc (header)
+    loop cho từng mục thuốc
+        RX->>DB: Khóa hàng thực thể thuốc (row-level lock)
+        alt thuốc đang hoạt động & đủ tồn kho
+            RX->>DB: Giảm tồn kho theo số lượng kê
+            RX->>DB: Tạo mục đơn thuốc (snapshot tên, đơn vị, đơn giá)
+            RX->>DB: Tạo bản ghi xuất kho gắn với đơn
+        else thuốc bị khóa / không đủ tồn kho
             RX-->>DB: Rollback
-            RX-->>API: Domain error (INSUFFICIENT_STOCK / MEDICINE_NOT_ACTIVE)
+            RX-->>API: Domain error (không đủ tồn kho / thuốc không khả dụng)
             API-->>D: 4xx error
         end
     end
-    RX->>DB: Update Prescription.totalAmount
-    RX->>DB: Advance Visit.status to EXAMINED (if not COMPLETED)
+    RX->>DB: Tổng hợp giá trị đơn thuốc
+    RX->>DB: Chuyển trạng thái lượt khám sang "đã khám" (qua state machine)
     RX->>DB: Commit
-    RX-->>API: Prescription created
-    API-->>D: 201 + prescription
+    RX-->>API: Đơn thuốc đã tạo
+    API-->>D: 201 + đơn thuốc
 ```
 
-##### 3.5.2.b. Invoice transaction (bill the visit)
+##### 3.5.2.b. Invoice transaction (tạo hóa đơn từ snapshot)
 
 ```mermaid
 sequenceDiagram
@@ -720,29 +720,29 @@ sequenceDiagram
     participant FIN as Finance Service
     participant DB as Relational DB
 
-    R->>API: Create invoice for visit
-    API->>FIN: createInvoiceFromVisit (visitId, fee)
+    R->>API: Yêu cầu tạo hóa đơn cho lượt khám
+    API->>FIN: Tạo hóa đơn (lượt khám, phí khám)
     FIN->>DB: Begin transaction
-    FIN->>DB: Load Visit + Prescription + PrescriptionDetails
-    alt invoice already exists
+    FIN->>DB: Đọc lượt khám và đơn thuốc kèm các mục
+    alt đã tồn tại hóa đơn cho lượt khám
         FIN-->>DB: Rollback
-        FIN-->>API: Domain error (INVOICE_ALREADY_EXISTS)
+        FIN-->>API: Domain error (hóa đơn đã tồn tại)
         API-->>R: 4xx error
-    else no existing invoice
-        FIN->>DB: Generate invoiceCode
-        FIN->>DB: Insert Invoice header (UNPAID)
-        FIN->>DB: Insert InvoiceItem (EXAMINATION fee)
-        loop for each PrescriptionDetail
-            FIN->>DB: Insert InvoiceItem (MEDICINE, snapshot from detail)
+    else chưa có hóa đơn
+        FIN->>DB: Sinh mã hóa đơn trong transaction
+        FIN->>DB: Tạo hóa đơn (trạng thái chưa thanh toán)
+        FIN->>DB: Tạo mục hóa đơn cho phí khám
+        loop cho từng mục đơn thuốc
+            FIN->>DB: Tạo mục hóa đơn (snapshot từ mục đơn thuốc)
         end
-        FIN->>DB: Update Invoice.totalAmount
+        FIN->>DB: Tổng hợp giá trị hóa đơn
         FIN->>DB: Commit
-        FIN-->>API: Invoice ready
-        API-->>R: 201 + invoice
+        FIN-->>API: Hóa đơn đã tạo
+        API-->>R: 201 + hóa đơn
     end
 ```
 
-> Lưu ý kiến trúc: **stock đã được trừ ở biên (a)**, nên biên (b) không động chạm tồn kho — chỉ đọc snapshot từ PrescriptionDetail. Quyết định này ưu tiên đảm bảo bác sĩ không kê đơn vượt tồn kho ngay tại thời điểm khám, đổi lại lễ tân phải phối hợp với bác sĩ khi muốn sửa đơn (luồng updatePrescription giữ tính nguyên tử bằng cách phục hồi tồn kho cũ rồi trừ lại tồn kho mới trong cùng một transaction).
+> Lưu ý kiến trúc: **tồn kho đã được trừ ở biên (a)**, nên biên (b) không động chạm tồn kho — chỉ đọc snapshot giá / số lượng từ các mục đơn thuốc. Quyết định này ưu tiên đảm bảo bác sĩ không kê đơn vượt tồn kho ngay tại thời điểm khám, đổi lại khi cần sửa đơn đã có hóa đơn, transaction sửa đơn phải phối hợp phục hồi tồn kho cũ, trừ lại tồn kho mới và đồng bộ các mục hóa đơn trong cùng một transaction để giữ tính nguyên tử xuyên hai biên.
 
 #### 3.5.3. Authentication, request validation và token revocation (ASR-SEC-01)
 
