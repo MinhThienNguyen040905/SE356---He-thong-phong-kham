@@ -18,6 +18,20 @@ import {
   generateExportCode,
   generateInvoiceCode,
 } from "../../utils/codeGenerator";
+import {
+  AppointmentStateMachine,
+  VisitStateMachine,
+} from "../../utils/stateMachine";
+import { AppointmentStatus } from "../../constant/appointment";
+
+// Memento Pattern (GoF, Behavioral):
+// PrescriptionDetail giữ snapshot của Medicine tại thời điểm kê đơn,
+// để đơn thuốc và hóa đơn cô lập khỏi thay đổi giá / tên thuốc sau này.
+const createMedicineMemento = (medicine: Medicine) => ({
+  medicineName: medicine.name,
+  unit: medicine.unit,
+  unitPrice: medicine.salePrice,
+});
 
 
 interface MedicineInput {
@@ -79,6 +93,11 @@ export const createPrescriptionService = async (
         throw new Error("APPOINTMENT_NOT_FOUND");
       }
       if (appointment.status === "CHECKED_IN") {
+        // State Pattern (GoF): mọi transition đi qua state machine tập trung
+        AppointmentStateMachine.validateTransition(
+          AppointmentStatus.CHECKED_IN,
+          AppointmentStatus.IN_PROGRESS
+        );
         appointment.status = "IN_PROGRESS";
         await appointment.save({ transaction: t });
       } else if (appointment.status !== "IN_PROGRESS") {
@@ -151,10 +170,8 @@ export const createPrescriptionService = async (
           {
             prescriptionId: prescription.id,
             medicineId: medicine.id,
-            medicineName: medicine.name, 
+            ...createMedicineMemento(medicine), // Memento Pattern: snapshot tên/đơn vị/giá
             quantity: item.quantity,
-            unit: medicine.unit, 
-            unitPrice: medicine.salePrice, 
             dosageMorning: item.dosageMorning,
             dosageNoon: item.dosageNoon,
             dosageAfternoon: item.dosageAfternoon,
@@ -184,11 +201,12 @@ export const createPrescriptionService = async (
       prescription.totalAmount = totalAmount;
       await prescription.save({ transaction: t });
 
-      
+
       if (visit.status !== "COMPLETED") {
-        
         if (visit.status !== "EXAMINED") {
-           visit.status = "EXAMINED";
+          // State Pattern (GoF): mọi transition đi qua state machine tập trung
+          VisitStateMachine.validateTransition(visit.status, "EXAMINED");
+          visit.status = "EXAMINED";
         }
         visit.checkOutTime = visit.checkOutTime ?? new Date();
         await visit.save({ transaction: t });
@@ -317,10 +335,8 @@ export const updatePrescriptionService = async (
             {
               prescriptionId: prescription.id,
               medicineId: medicine.id,
-              medicineName: medicine.name,
+              ...createMedicineMemento(medicine), // Memento Pattern: snapshot tên/đơn vị/giá
               quantity: item.quantity,
-              unit: medicine.unit,
-              unitPrice: medicine.salePrice,
               dosageMorning: item.dosageMorning,
               dosageNoon: item.dosageNoon,
               dosageAfternoon: item.dosageAfternoon,
