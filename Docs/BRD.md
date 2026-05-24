@@ -79,13 +79,13 @@ The Clinic Management System is a digital platform that digitizes end-to-end ope
 
 **Patients** can self-register through email with OTP verification or Google OAuth login. They can search doctors by specialty, view available shifts, and book appointments online without calling the clinic. Patients can view their own medical records, prescriptions, and invoices. They can also cancel or reschedule their appointments according to the clinic's policy.
 
-**Receptionists** operate the front desk. They can register walk-in patients, book appointments on behalf of phone or in-person customers, check patients in upon arrival (which creates a clinical visit record), create invoices at the end of each visit (combining consultation fee and dispensed medicines into a single atomic transaction), and record patient payments.
+**Receptionists** operate the front desk. They can register walk-in patients, book appointments on behalf of phone or in-person customers, check patients in upon arrival (which creates a clinical visit record), create invoices at the end of each visit (combining the consultation fee and the medicine line items snapshotted from the doctor's prescription into a single atomic transaction), and record patient payments.
 
 **Doctors** view their daily shift schedule and the queue of checked-in patients. They record clinical findings (symptoms, vital signs, diagnosis) during each visit, optionally upload symptom images, classify the case by disease category, and issue digital prescriptions referencing the clinic's medicine catalog. Once a visit is completed, it becomes eligible for invoicing by the receptionist.
 
 **Administrators** oversee the entire system. They manage employees and assign role-based permissions, manage the medicine catalog and stock-ins from suppliers, generate monthly payroll based on attendance records, generate doctor schedules automatically based on shift templates, view full audit logs of all sensitive operations, and produce financial and operational reports in Excel or PDF format. Admins also configure business parameters at runtime (such as slots per shift, consultation fee, expiry warning thresholds) and can enable system maintenance mode without redeploying the application.
 
-The system guarantees **data integrity** for two critical flows: (1) concurrent appointment booking — multiple patients attempting to book the same near-full doctor shift will not exceed the slot limit, achieved through transactional row-level locking; (2) atomic invoice creation — the financial document, its line items, the dispensed medicine export records, and the corresponding inventory deduction all commit together or roll back together. The system also maintains a comprehensive audit log for all mutating operations on sensitive data (patients, visits, prescriptions, invoices, employees).
+The system guarantees **data integrity** for two critical flows: (1) concurrent appointment booking — multiple patients attempting to book the same near-full doctor shift will not exceed the slot limit, achieved through transactional row-level locking; (2) atomic financial operations split into **two separate transaction boundaries** by business responsibility: (a) **Prescription boundary** — when the doctor finalises the prescription, the Prescription header, PrescriptionDetail rows, Medicine stock deduction (with row-level lock), MedicineExport records and the Visit status update all commit together or roll back together; (b) **Invoice boundary** — when the receptionist later creates the invoice for that visit, the Invoice, its InvoiceItems (snapshotted from PrescriptionDetail) and the invoice code generation all commit together or roll back together, and idempotency is enforced so the same visit cannot produce two invoices. The system also maintains a comprehensive audit log for all mutating operations on sensitive data (patients, visits, prescriptions, invoices, employees).
 
 Notifications are sent through in-app banners and email (with hooks ready for future SMS or push channels). Email and external dependencies are designed for graceful degradation: if the SMTP server or OAuth provider is temporarily unavailable, core business flows (booking, examination, prescription, payment) continue to operate uninterrupted.
 
@@ -372,7 +372,7 @@ User "1" -- "*" AuditLog : "actor"
 | 21 | PrescriptionDetail | A line item within a Prescription: medicine, dosage, frequency, duration, instruction. |
 | 22 | Medicine | A medicine in the clinic's catalog: code, name, unit, selling price, current stock, active flag. |
 | 23 | MedicineImport | A stock-in record from a supplier, containing batch number, expiry date, cost price. Increments Medicine.stock. |
-| 24 | MedicineExport | A stock-out record automatically created when an invoice includes medicine items. Decrements Medicine.stock. |
+| 24 | MedicineExport | A stock-out record automatically created when a Doctor finalises a prescription (in the same transaction as the stock deduction). Decrements Medicine.stock. |
 | 25 | Invoice | A billing document for a completed Visit. Contains consultation fee and optional medicine items. Goes through states: PENDING → PARTIALLY_PAID → PAID (or REFUNDED). |
 | 26 | InvoiceItem | A line item in an Invoice: type (CONSULTATION or MEDICINE), unit price, quantity, subtotal. |
 | 27 | Payment | A recorded payment against an Invoice. Multiple payments may apply to one invoice until fully paid. |
@@ -411,15 +411,23 @@ end note
 |Doctor|
 :(7) Open daily queue, select patient;
 :(8) Record symptoms, vital signs, diagnosis;
-:(9) Create prescription (optional);
+:(9) Create prescription (optional, atomic transaction);
+note right
+  Prescription transaction:
+  Medicine stock is decremented and
+  MedicineExport rows are created in the
+  SAME transaction as the prescription.
+end note
 :(10) Complete visit (status: COMPLETED);
 
 |Receptionist|
-:(11) Create invoice (consultation fee + medicines, atomic transaction);
+:(11) Create invoice (consultation fee + medicine items snapshotted from prescription, atomic transaction);
 :(12) Record payment (status: PAID);
 note right
-  Stock is automatically decremented
-  in the same transaction
+  Invoice transaction:
+  Reads price/quantity snapshot from
+  PrescriptionDetail. Does NOT touch
+  Medicine.stock or MedicineExport.
 end note
 
 |System|
@@ -564,8 +572,8 @@ UC9 ..> UC18 : <<precedes>>
 UC10 ..> UC13 : <<may extend>>
 UC13 ..> UC14 : <<creates>>
 UC14 ..> UC15 : <<may include>>
+UC15 ..> UC17 : <<decrements stock>>
 UC18 ..> UC19 : <<followed by>>
-UC18 ..> UC17 : <<decrements stock>>
 UC19 ..> UC20 : <<may be reversed by>>
 @enduml
 ```
@@ -599,10 +607,10 @@ UC19 ..> UC20 : <<may be reversed by>>
 | 12 | Reschedule Appointment | This use case describes how an appointment is rescheduled to a different doctor shift while preserving the appointment record. |
 | 13 | Check-in Patient | This use case describes how a Receptionist checks in a patient upon arrival, creating a Visit record and updating the appointment status. |
 | 14 | Record Visit | This use case describes how a Doctor records clinical examination details: symptoms, vital signs, diagnosis, and optionally attaches images. |
-| 15 | Create Prescription | This use case describes how a Doctor creates a prescription tied to a visit, specifying medicines, dosages, and instructions. |
+| 15 | Create Prescription | This use case describes how a Doctor creates a prescription tied to a visit, specifying medicines, dosages, and instructions. The operation is atomic across Prescription, PrescriptionDetail (snapshotting medicine name/unit/unit price), Medicine.stock deduction (with row-level lock), MedicineExport, and the Visit status update. |
 | 16 | Manage Medicine | This use case describes how Admin creates, updates, or deactivates medicines in the catalog. |
 | 17 | Import Medicine to Stock | This use case describes how Admin records a stock-in of medicines from a supplier, incrementing the inventory. |
-| 18 | Create Invoice | This use case describes how a Receptionist creates an invoice for a completed visit, atomic across Invoice, InvoiceItem, MedicineExport, and Medicine.stock. |
+| 18 | Create Invoice | This use case describes how a Receptionist creates an invoice for a completed visit. The operation is atomic across Invoice and InvoiceItem; medicine line items are populated by **reading the price/quantity snapshot from PrescriptionDetail** (which was already locked-in during the prescription transaction — UC15). This boundary does NOT touch Medicine.stock or MedicineExport. An idempotency check prevents creating two invoices for the same visit. |
 | 19 | Process Payment | This use case describes how a Receptionist records a payment against an invoice (cash, bank transfer, or future online gateways). |
 | 20 | Process Refund | This use case describes how Admin processes a refund for a paid invoice (e.g. wrong medicine dispensed, service not delivered). |
 | 21 | Generate Payroll | This use case describes how Admin generates monthly payroll for all employees based on base salary, attendance, and overtime. |
@@ -716,7 +724,7 @@ This section outlines the requested changes, enhancements, or migration tasks re
 | 1 | **Data Migration** | Migrate existing patient records, historical visit data, and employee profiles from the legacy local Excel/paper-based records to the new cloud-based MySQL database. |
 | 2 | **OAuth2 Integration** | Implement and enforce Google OAuth2 login as an alternative to standard email/password authentication to improve user convenience and security. |
 | 3 | **Automated Scheduling** | Shift from manual doctor schedule creation (paper rota) to an automated Weekly Schedule Generation system using Cron Jobs and predefined Shift Templates. |
-| 4 | **Digital Prescription** | Transition from paper-based prescriptions to a digital prescription module integrated with the medicine inventory; medicine quantities are automatically deducted from inventory upon invoice creation. |
+| 4 | **Digital Prescription** | Transition from paper-based prescriptions to a digital prescription module integrated with the medicine inventory; medicine quantities are automatically deducted from inventory **upon prescription creation** (in the same atomic transaction), and MedicineExport records are written at that moment for traceability. |
 | 5 | **Automated No-Show Tracking** | Implement a background job that automatically marks appointments as "No-Show" 30 minutes after their scheduled time if the patient has not checked in. |
 | 6 | **Automated Notifications** | Replace manual phone call reminders with automated email notifications for appointment confirmations, cancellations, doctor reassignments, and prescription readiness. |
 | 7 | **Payroll Calculation** | Automate the monthly payroll calculation for clinic staff, incorporating base salary, role-based coefficients, doctor overtime, and attendance penalties (late minutes). |
@@ -751,7 +759,7 @@ This section outlines the requested changes, enhancements, or migration tasks re
 | **Shift** | A standardized work period on a specific date (e.g. Morning of 2026-05-20, 07:00–11:00). |
 | **Shift Template** | A reusable definition of a recurring shift (e.g. "Morning 07:00–11:00") used to generate concrete Shift instances. |
 | **Invoice** | A billing document for a completed Visit, containing consultation fee and optional medicine items. |
-| **Medicine Export** | A record of medicines dispensed to a patient as part of an invoice; decrements stock. |
+| **Medicine Export** | A record of medicines dispensed to a patient. Created automatically inside the prescription transaction (UC15), in the same step as the Medicine.stock decrement. |
 | **Medicine Import** | A record of medicines stocked in from a supplier; increments stock. |
 | **No-show** | An appointment status indicating the patient did not check in by the end of the shift. |
 | **State Machine** | A centralized utility enforcing valid status transitions for Appointment, Visit, and Invoice entities. |
