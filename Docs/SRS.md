@@ -880,31 +880,20 @@ start
 |System|
 :(2) Display prescription form with medicine search;
 |Doctor|
-repeat
-  :(3) Search medicine by name or code;
-  |System|
-  :(4) Show matching active medicines;
-  |Doctor|
-  :(5) Select medicine and enter quantity, dosage per session, days, instruction;
-repeat while ((6) more medicines?)
-:(7) Click "Save Prescription";
+:(3) Search medicine, select items, enter quantity, dosage per session, days, instruction (repeat for each medicine);
+:(4) Click "Save Prescription";
 |System|
-:(8) Begin transaction (READ COMMITTED);
-:(9) Verify Visit ownership and state; lock Appointment FOR UPDATE; transition Appointment via AppointmentStateMachine if needed;
-:(10) Check no existing Prescription for this visit (idempotency);
-:(11) Generate prescriptionCode and insert Prescription header (DRAFT, totalAmount=0);
-repeat
-  :(12) Lock Medicine FOR UPDATE (pessimistic);
-  :(13) Validate Medicine ACTIVE and stock >= requested quantity (else throw INSUFFICIENT_STOCK);
-  :(14) Decrement Medicine.quantity;
-  :(15) Insert PrescriptionDetail (with medicine name/unit/unit price snapshot);
-  :(16) Insert MedicineExport (reason = PRESCRIPTION_{code});
-repeat while (more items?)
-:(17) Update Prescription.totalAmount;
-:(18) Transition Visit to EXAMINED via VisitStateMachine; set checkOutTime;
-:(19) Commit;
+:(5) Begin transaction (READ COMMITTED);
+:(6) Verify Visit ownership and state;
+:(7) Lock Appointment FOR UPDATE; transition Appointment via AppointmentStateMachine if needed;
+:(8) Check no existing Prescription for this visit (idempotency);
+:(9) Generate prescriptionCode and insert Prescription header (DRAFT, totalAmount=0);
+:(10) For each item: lock Medicine FOR UPDATE, validate ACTIVE + stock >= requested (else throw INSUFFICIENT_STOCK and rollback), decrement Medicine.quantity, insert PrescriptionDetail (with medicine name/unit/unitPrice snapshot), insert MedicineExport (reason = PRESCRIPTION_{code});
+:(11) Update Prescription.totalAmount;
+:(12) Transition Visit to EXAMINED via VisitStateMachine; set checkOutTime;
+:(13) Commit;
 |Doctor|
-:(20) Show success and optionally print prescription PDF;
+:(14) Show success and optionally print prescription PDF;
 stop
 @enduml
 ```
@@ -913,13 +902,13 @@ stop
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (4) | BR56 | **Medicine Search Rules:**<br/>• `medicineRepository.searchByName([q])` with `WHERE name LIKE %?% AND status = 'ACTIVE'`.<br/>• Limit 20 results, ordered by relevance. |
-| (5) | BR57 | **Prescription Detail Rules:**<br/>• [quantity] required, integer ≥ 1.<br/>• [dosageMorning/Noon/Afternoon/Evening] required, decimal ≥ 0.<br/>• [days] required, integer ≥ 1.<br/>• [instruction] optional, e.g. "after meal". |
-| (9) | BR58a | **Ownership & State Rules:**<br/>• `visit.doctorId === requesterDoctorId` else throw `UNAUTHORIZED_VISIT`.<br/>• `visit.status ∈ {EXAMINING, EXAMINED, COMPLETED}` else throw `VISIT_NOT_EXAMINED`.<br/>• Lock `Appointment` row with `FOR UPDATE`. If status = CHECKED_IN, transition to IN_PROGRESS via `AppointmentStateMachine.validateTransition`; if already IN_PROGRESS, proceed; otherwise throw `APPOINTMENT_NOT_IN_PROGRESS`. |
-| (10) | BR58b | **Idempotency Rules:**<br/>• If a Prescription already exists for this `visitId`, throw `PRESCRIPTION_ALREADY_EXISTS`. |
-| (12)–(16) | BR58c | **Atomic Stock Deduction Rules (CRITICAL):**<br/>• Entire flow wrapped in `sequelize.transaction({ isolationLevel: READ_COMMITTED })`.<br/>• Each Medicine row is loaded with `lock: t.LOCK.UPDATE` (`SELECT ... FOR UPDATE`).<br/>• If `medicine.status !== 'ACTIVE'`, throw `MEDICINE_NOT_ACTIVE_{name}` and rollback.<br/>• If `medicine.quantity < requested`, throw `INSUFFICIENT_STOCK_{name}_Available:X_Requested:Y` and rollback.<br/>• `medicine.quantity -= requested` is persisted in the same transaction.<br/>• PrescriptionDetail stores **snapshot** of `medicineName`, `unit`, `unitPrice` (Memento Pattern) so downstream invoices remain stable against future price/name changes.<br/>• A MedicineExport row is inserted with `reason = 'PRESCRIPTION_' + prescriptionCode` for traceability.<br/>• Any failure inside the loop rolls back the whole transaction — stock is restored, prescription header disappears, exports disappear. |
-| (11) | BR59 | **Code Generation:** `prescriptionCode = 'RX-' + YYYYMMDD + '-' + 5_digit_sequence`, generated inside the transaction to avoid duplicates. |
-| (18) | BR58d | **Visit State Transition:** Use `VisitStateMachine.validateTransition(currentStatus, 'EXAMINED')` before assignment. Skipped if visit is already EXAMINED or COMPLETED. |
+| (2) | BR56 | **Medicine Search Rules:**<br/>• `medicineRepository.searchByName([q])` with `WHERE name LIKE %?% AND status = 'ACTIVE'`.<br/>• Limit 20 results, ordered by relevance. |
+| (3) | BR57 | **Prescription Detail Rules:**<br/>• [quantity] required, integer ≥ 1.<br/>• [dosageMorning/Noon/Afternoon/Evening] required, decimal ≥ 0.<br/>• [days] required, integer ≥ 1.<br/>• [instruction] optional, e.g. "after meal". |
+| (6)–(7) | BR58a | **Ownership & State Rules:**<br/>• `visit.doctorId === requesterDoctorId` else throw `UNAUTHORIZED_VISIT`.<br/>• `visit.status ∈ {EXAMINING, EXAMINED, COMPLETED}` else throw `VISIT_NOT_EXAMINED`.<br/>• Lock `Appointment` row with `FOR UPDATE`. If status = CHECKED_IN, transition to IN_PROGRESS via `AppointmentStateMachine.validateTransition`; if already IN_PROGRESS, proceed; otherwise throw `APPOINTMENT_NOT_IN_PROGRESS`. |
+| (8) | BR58b | **Idempotency Rules:**<br/>• If a Prescription already exists for this `visitId`, throw `PRESCRIPTION_ALREADY_EXISTS`. |
+| (10) | BR58c | **Atomic Stock Deduction Rules (CRITICAL):**<br/>• Entire flow wrapped in `sequelize.transaction({ isolationLevel: READ_COMMITTED })`.<br/>• Each Medicine row is loaded with `lock: t.LOCK.UPDATE` (`SELECT ... FOR UPDATE`).<br/>• If `medicine.status !== 'ACTIVE'`, throw `MEDICINE_NOT_ACTIVE_{name}` and rollback.<br/>• If `medicine.quantity < requested`, throw `INSUFFICIENT_STOCK_{name}_Available:X_Requested:Y` and rollback.<br/>• `medicine.quantity -= requested` is persisted in the same transaction.<br/>• PrescriptionDetail stores **snapshot** of `medicineName`, `unit`, `unitPrice` (Memento Pattern) so downstream invoices remain stable against future price/name changes.<br/>• A MedicineExport row is inserted with `reason = 'PRESCRIPTION_' + prescriptionCode` for traceability.<br/>• Any failure inside the loop rolls back the whole transaction — stock is restored, prescription header disappears, exports disappear. |
+| (9) | BR59 | **Code Generation:** `prescriptionCode = 'RX-' + YYYYMMDD + '-' + 5_digit_sequence`, generated inside the transaction to avoid duplicates. |
+| (12) | BR58d | **Visit State Transition:** Use `VisitStateMachine.validateTransition(currentStatus, 'EXAMINED')` before assignment. Skipped if visit is already EXAMINED or COMPLETED. |
 
 ---
 
@@ -1051,18 +1040,14 @@ start
 :(5) Begin transaction;
 :(6) Load Visit with its Prescription and PrescriptionDetail rows;
 if ((7) an Invoice already exists for this visit?) then (yes)
-  :Rollback;
-  |Receptionist|
-  :Show "Invoice already exists for this visit" error;
+  :Rollback and show "Invoice already exists for this visit" error;
   stop
 else (no)
 endif
 :(8) Generate invoiceCode (inside transaction);
 :(9) Insert Invoice header (UNPAID, medicineTotalAmount=0, totalAmount=examinationFee);
 :(10) Insert InvoiceItem of itemType EXAMINATION (consultation fee);
-repeat
-  :(11) For each PrescriptionDetail, insert InvoiceItem of itemType MEDICINE — copying medicineName, quantity, unitPrice from PrescriptionDetail (snapshot read);
-repeat while (more details?)
+:(11) For each PrescriptionDetail, insert InvoiceItem of itemType MEDICINE — copying medicineName, quantity, unitPrice from PrescriptionDetail (snapshot read, no Medicine table touched);
 :(12) Update Invoice.medicineTotalAmount and Invoice.totalAmount = examinationFee + medicineTotalAmount - discount;
 :(13) Commit; emit InvoiceCreated event; audit log;
 |Receptionist|
