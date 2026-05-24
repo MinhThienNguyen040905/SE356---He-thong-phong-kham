@@ -1028,12 +1028,12 @@ endif
 
 ```plantuml
 @startuml
-|Receptionist|
+|Recep|
 start
 :(1) Select a visit that has been examined;
 |System|
 :(2) Display visit summary with prescription items and their snapshot unitPrice and quantity;
-|Receptionist|
+|Recep|
 :(3) Confirm consultation fee;
 :(4) Click Create Invoice;
 |System|
@@ -1046,11 +1046,12 @@ start
 :(11) For each PrescriptionDetail insert InvoiceItem of itemType MEDICINE by copying medicineName, quantity, unitPrice from PrescriptionDetail (snapshot read, no Medicine table touched);
 :(12) Update Invoice.medicineTotalAmount and Invoice.totalAmount;
 :(13) Commit, emit InvoiceCreated event, audit log;
-|Receptionist|
+|Recep|
 :(14) Display invoice with print option;
 stop
 @enduml
 ```
+> *Lane `Recep` viết tắt của Receptionist — PlantUML 1.2025.10 có bug rendering swimlane khi tên 2 lane chênh lệch độ dài lớn (`Receptionist` 12 ký tự vs `System` 6 ký tự gây zero-width slot trong `drawTitles`). Viết tắt giữ cho 2 lane gần độ dài.*
 
 **Business Rules**
 
