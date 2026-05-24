@@ -1039,11 +1039,7 @@ start
 |System|
 :(5) Begin transaction;
 :(6) Load Visit with its Prescription and PrescriptionDetail rows;
-if ((7) an Invoice already exists for this visit?) then (yes)
-  :Rollback and show "Invoice already exists for this visit" error;
-  stop
-else (no)
-endif
+:(7) Idempotency check: if an Invoice already exists for this visitId, rollback and throw "Invoice already exists for this visit";
 :(8) Generate invoiceCode (inside transaction);
 :(9) Insert Invoice header (UNPAID, medicineTotalAmount=0, totalAmount=examinationFee);
 :(10) Insert InvoiceItem of itemType EXAMINATION (consultation fee);
