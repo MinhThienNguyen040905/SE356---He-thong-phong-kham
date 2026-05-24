@@ -1028,26 +1028,21 @@ endif
 
 ```plantuml
 @startuml
-|Receptionist|
 start
-:(1) Select a visit that has been examined;
-|System|
-:(2) Display visit summary, including the prescription's items with their snapshotted unitPrice and quantity;
-|Receptionist|
-:(3) Confirm consultation fee;
-:(4) Click "Create Invoice";
-|System|
-:(5) Begin transaction;
-:(6) Load Visit with its Prescription and PrescriptionDetail rows;
-:(7) Idempotency check: if an Invoice already exists for this visitId, rollback and throw "Invoice already exists for this visit";
-:(8) Generate invoiceCode (inside transaction);
-:(9) Insert Invoice header (UNPAID, medicineTotalAmount=0, totalAmount=examinationFee);
-:(10) Insert InvoiceItem of itemType EXAMINATION (consultation fee);
-:(11) For each PrescriptionDetail, insert InvoiceItem of itemType MEDICINE — copying medicineName, quantity, unitPrice from PrescriptionDetail (snapshot read, no Medicine table touched);
-:(12) Update Invoice.medicineTotalAmount and Invoice.totalAmount = examinationFee + medicineTotalAmount - discount;
-:(13) Commit; emit InvoiceCreated event; audit log;
-|Receptionist|
-:(14) Display invoice with print option;
+:[Receptionist] (1) Select a visit that has been examined;
+:[System] (2) Display visit summary with prescription items;
+:[Receptionist] (3) Confirm consultation fee;
+:[Receptionist] (4) Click Create Invoice;
+:[System] (5) Begin transaction;
+:[System] (6) Load Visit with Prescription and PrescriptionDetail;
+:[System] (7) Idempotency check - rollback if Invoice exists for this visitId;
+:[System] (8) Generate invoiceCode inside transaction;
+:[System] (9) Insert Invoice header as UNPAID;
+:[System] (10) Insert InvoiceItem of type EXAMINATION;
+:[System] (11) For each PrescriptionDetail insert InvoiceItem of type MEDICINE - snapshot read from PrescriptionDetail;
+:[System] (12) Update Invoice totals;
+:[System] (13) Commit and emit InvoiceCreated event;
+:[Receptionist] (14) Display invoice with print option;
 stop
 @enduml
 ```
