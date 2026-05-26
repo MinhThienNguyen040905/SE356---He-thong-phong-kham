@@ -17,6 +17,7 @@ ASR → SRS UC → Utility Tree → ADD → SAD → Code → Pattern → Demo
 | 7. Sang code + chỉ ra pattern | [04_Code_walkthrough.md](04_Code_walkthrough.md) |
 | Demo trên hệ thống thực | [05_Demo_huong_dan.md](05_Demo_huong_dan.md) |
 | Câu hỏi giảng viên hay hỏi + trả lời mẫu | [06_QA_cheatsheet.md](06_QA_cheatsheet.md) |
+| **Fault Tree Analysis** (yêu cầu 2 của giảng viên) | [07_Fault_Tree.md](07_Fault_Tree.md) |
 
 ---
 
