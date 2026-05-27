@@ -864,11 +864,11 @@ endif
 
 | Name | Create Prescription |
 | --- | --- |
-| **Description** | This use case allows a Doctor to create a prescription tied to a visit, specifying medicines, dosages, and instructions. |
+| **Description** | This use case allows a Doctor to create a prescription tied to a visit, specifying medicines, dosages, and instructions. **This is the *prescription transaction boundary* of ASR-DI-02** — it is atomic across Prescription, PrescriptionDetail (snapshotting medicine name/unit/unit price), Medicine.stock deduction, MedicineExport, the Appointment state transition (CHECKED_IN → IN_PROGRESS), and the Visit state transition (EXAMINING/EXAMINED → EXAMINED). |
 | **Actor** | Doctor |
 | **Trigger** | When the Doctor clicks "Create Prescription" on the visit page. |
-| **Pre-condition** | The Doctor is logged in. The Visit is in status 'IN_PROGRESS' or 'COMPLETED'. |
-| **Post-condition** | A new Prescription record with PrescriptionDetail entries is created. |
+| **Pre-condition** | The Doctor is logged in and owns the Visit. The Visit is in status 'EXAMINING', 'EXAMINED' or 'COMPLETED'. The Appointment is in 'CHECKED_IN' or 'IN_PROGRESS'. No prescription has been created for this visit yet. |
+| **Post-condition** | A new Prescription (status DRAFT) with PrescriptionDetail entries is created. Medicine.quantity is decremented for each item. A MedicineExport row is inserted for each item. The Visit transitions to EXAMINED. If any step fails, **all changes are rolled back** (atomicity). |
 
 **Activities Flow**
 
@@ -880,21 +880,20 @@ start
 |System|
 :(2) Display prescription form with medicine search;
 |Doctor|
-repeat
-  :(3) Search medicine by name or code;
-  |System|
-  :(4) Show matching active medicines;
-  |Doctor|
-  :(5) Select medicine and enter dosage, frequency, duration, instruction;
-repeat while ((6) more medicines?)
-:(7) Click "Save Prescription";
+:(3) Search medicine, select items, enter quantity, dosage per session, days, instruction (repeat for each medicine);
+:(4) Click "Save Prescription";
 |System|
-:(8) Begin transaction;
-:(9) Validate each medicine is active and check stock (warning only);
-:(10) Generate prescriptionCode and insert Prescription + PrescriptionDetail;
-:(11) Commit, emit PrescriptionCreated event, notify patient;
+:(5) Begin transaction (READ COMMITTED);
+:(6) Verify Visit ownership and state;
+:(7) Lock Appointment FOR UPDATE; transition Appointment via AppointmentStateMachine if needed;
+:(8) Check no existing Prescription for this visit (idempotency);
+:(9) Generate prescriptionCode and insert Prescription header (DRAFT, totalAmount=0);
+:(10) For each item: lock Medicine FOR UPDATE, validate ACTIVE + stock >= requested (else throw INSUFFICIENT_STOCK and rollback), decrement Medicine.quantity, insert PrescriptionDetail (with medicine name/unit/unitPrice snapshot), insert MedicineExport (reason = PRESCRIPTION_{code});
+:(11) Update Prescription.totalAmount;
+:(12) Transition Visit to EXAMINED via VisitStateMachine; set checkOutTime;
+:(13) Commit;
 |Doctor|
-:(12) Show success and optionally print prescription PDF;
+:(14) Show success and optionally print prescription PDF;
 stop
 @enduml
 ```
@@ -903,10 +902,13 @@ stop
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (4) | BR56 | **Medicine Search Rules:**<br/>• `medicineRepository.searchByName([q])` with `WHERE name LIKE %?% AND isActive = true`.<br/>• Limit 20 results, ordered by relevance. |
-| (5) | BR57 | **Prescription Detail Rules:**<br/>• [dosage] required, e.g. "1 tablet"<br/>• [frequency] required, e.g. "3 times/day"<br/>• [duration] required, e.g. "7 days"<br/>• [instruction] optional, e.g. "after meal". |
-| (9) | BR58 | **Stock Warning:** If `medicine.stock < quantity_needed`, show warning but allow saving (patient may buy medicine elsewhere). |
-| (10) | BR59 | **Code Generation:** `prescriptionCode = 'RX-' + YYYYMMDD + '-' + 5_digit_sequence`. |
+| (2) | BR56 | **Medicine Search Rules:**<br/>• `medicineRepository.searchByName([q])` with `WHERE name LIKE %?% AND status = 'ACTIVE'`.<br/>• Limit 20 results, ordered by relevance. |
+| (3) | BR57 | **Prescription Detail Rules:**<br/>• [quantity] required, integer ≥ 1.<br/>• [dosageMorning/Noon/Afternoon/Evening] required, decimal ≥ 0.<br/>• [days] required, integer ≥ 1.<br/>• [instruction] optional, e.g. "after meal". |
+| (6)–(7) | BR58a | **Ownership & State Rules:**<br/>• `visit.doctorId === requesterDoctorId` else throw `UNAUTHORIZED_VISIT`.<br/>• `visit.status ∈ {EXAMINING, EXAMINED, COMPLETED}` else throw `VISIT_NOT_EXAMINED`.<br/>• Lock `Appointment` row with `FOR UPDATE`. If status = CHECKED_IN, transition to IN_PROGRESS via `AppointmentStateMachine.validateTransition`; if already IN_PROGRESS, proceed; otherwise throw `APPOINTMENT_NOT_IN_PROGRESS`. |
+| (8) | BR58b | **Idempotency Rules:**<br/>• If a Prescription already exists for this `visitId`, throw `PRESCRIPTION_ALREADY_EXISTS`. |
+| (10) | BR58c | **Atomic Stock Deduction Rules (CRITICAL):**<br/>• Entire flow wrapped in `sequelize.transaction({ isolationLevel: READ_COMMITTED })`.<br/>• Each Medicine row is loaded with `lock: t.LOCK.UPDATE` (`SELECT ... FOR UPDATE`).<br/>• If `medicine.status !== 'ACTIVE'`, throw `MEDICINE_NOT_ACTIVE_{name}` and rollback.<br/>• If `medicine.quantity < requested`, throw `INSUFFICIENT_STOCK_{name}_Available:X_Requested:Y` and rollback.<br/>• `medicine.quantity -= requested` is persisted in the same transaction.<br/>• PrescriptionDetail stores **snapshot** of `medicineName`, `unit`, `unitPrice` (Memento Pattern) so downstream invoices remain stable against future price/name changes.<br/>• A MedicineExport row is inserted with `reason = 'PRESCRIPTION_' + prescriptionCode` for traceability.<br/>• Any failure inside the loop rolls back the whole transaction — stock is restored, prescription header disappears, exports disappear. |
+| (9) | BR59 | **Code Generation:** `prescriptionCode = 'RX-' + YYYYMMDD + '-' + 5_digit_sequence`, generated inside the transaction to avoid duplicates. |
+| (12) | BR58d | **Visit State Transition:** Use `VisitStateMachine.validateTransition(currentStatus, 'EXAMINED')` before assignment. Skipped if visit is already EXAMINED or COMPLETED. |
 
 ---
 
@@ -1016,53 +1018,51 @@ endif
 
 | Name | Create Invoice |
 | --- | --- |
-| **Description** | This use case allows Receptionist to create an invoice for a completed visit, including consultation fee and optionally medicines from the prescription. The operation must be atomic across Invoice, InvoiceItem, MedicineExport, and Visit status. |
+| **Description** | This use case allows the Receptionist to create an invoice for a visit that has been examined (its prescription, if any, has already been finalised by UC15). **This is the *invoice transaction boundary* of ASR-DI-02** — it is atomic across Invoice and InvoiceItem only. It populates medicine line items by **reading the price/quantity snapshot from PrescriptionDetail** (Memento) and does NOT touch Medicine.stock or MedicineExport (those were already updated atomically inside the UC15 prescription transaction). An idempotency check prevents creating two invoices for the same visit. |
 | **Actor** | Receptionist |
-| **Trigger** | When the Receptionist clicks "Create Invoice" on a completed visit. |
-| **Pre-condition** | The Receptionist is logged in. The Visit is in status 'COMPLETED' and not yet invoiced. |
-| **Post-condition** | A new Invoice with InvoiceItems is created. If medicines are included, MedicineExport records are created and Medicine.stock is decremented. The Visit.status becomes 'INVOICED'. |
+| **Trigger** | When the Receptionist clicks "Create Invoice" on the visit page. |
+| **Pre-condition** | The Receptionist is logged in. The Visit exists and has not yet been invoiced. If the doctor created a prescription, the prescription transaction (UC15) has already committed — Medicine.stock is already decremented and PrescriptionDetail rows hold the price snapshot. |
+| **Post-condition** | A new Invoice (status UNPAID) is created with one EXAMINATION InvoiceItem and one MEDICINE InvoiceItem per PrescriptionDetail. `Invoice.totalAmount = examinationFee + medicineTotalAmount - discount`. If any step fails, **all changes within the invoice transaction are rolled back** — but Medicine.stock / MedicineExport from UC15 are NOT affected (they belong to a different boundary). |
 
 **Activities Flow**
 
 ```plantuml
 @startuml
-|Receptionist|
+|Recep|
 start
-:(1) Select a completed visit;
+:(1) Select a visit that has been examined;
 |System|
-:(2) Display visit summary with prescription items (mark out-of-stock);
-|Receptionist|
-:(3) Confirm consultation fee and select medicines to include;
-:(4) Click "Create Invoice";
+:(2) Display visit summary with prescription items and their snapshot unitPrice and quantity;
+|Recep|
+:(3) Confirm consultation fee;
+:(4) Click Create Invoice;
 |System|
-:(5) Begin transaction, SELECT Visit FOR UPDATE;
-if (visit COMPLETED and not invoiced?) then (yes)
-  :(6) Generate invoiceCode, insert Invoice header (status PENDING);
-  :(7) For each medicine: conditional UPDATE stock, insert MedicineExport + InvoiceItem (atomic);
-  :(8) Apply pricing (consultation fee, medicine snapshot price);
-  :(9) UPDATE Invoice.total, transition Visit COMPLETED → INVOICED via state machine;
-  :(10) Commit, emit InvoiceCreated event, audit log;
-  |Receptionist|
-  :(11) Display invoice with print option;
-  stop
-else (no)
-  :Rollback;
-  |Receptionist|
-  :Show error (already invoiced, stock insufficient, or invalid state);
-  stop
-endif
+:(5) Begin transaction;
+:(6) Load Visit with its Prescription and PrescriptionDetail rows;
+:(7) Idempotency check: rollback if an Invoice already exists for this visitId;
+:(8) Generate invoiceCode inside transaction;
+:(9) Insert Invoice header (status UNPAID, medicineTotalAmount zero, totalAmount equals examinationFee);
+:(10) Insert InvoiceItem of itemType EXAMINATION for the consultation fee;
+:(11) For each PrescriptionDetail insert InvoiceItem of itemType MEDICINE by copying medicineName, quantity, unitPrice from PrescriptionDetail (snapshot read, no Medicine table touched);
+:(12) Update Invoice.medicineTotalAmount and Invoice.totalAmount;
+:(13) Commit, emit InvoiceCreated event, audit log;
+|Recep|
+:(14) Display invoice with print option;
+stop
 @enduml
 ```
+> *Lane `Recep` viết tắt của Receptionist — PlantUML 1.2025.10 có bug rendering swimlane khi tên 2 lane chênh lệch độ dài lớn (`Receptionist` 12 ký tự vs `System` 6 ký tự gây zero-width slot trong `drawTitles`). Viết tắt giữ cho 2 lane gần độ dài.*
 
 **Business Rules**
 
 | Activity | BR Code | Description |
 | --- | --- | --- |
-| (2) | BR65 | **Pre-fetch Rules:** Display prescription items with current stock levels and selling prices. Mark out-of-stock items with warning. |
-| (7) | BR66 | **Atomic Transaction Rules (CRITICAL):**<br/>• Entire flow wrapped in `sequelize.transaction()`.<br/>• Visit row locked with `SELECT ... FOR UPDATE`.<br/>• Stock decrement uses conditional `UPDATE ... WHERE stock >= qty` to prevent over-deduction without explicit lock.<br/>• If `affectedRows == 0`, throw `STOCK_INSUFFICIENT` (MSG 63) and rollback entire transaction. |
-| (6) | BR67 | **Invoice Code:** `invoiceCode = 'INV-' + YYYYMMDD + '-' + 5_digit_sequence`. |
-| (8) | BR68 | **Pricing Rules:** Consultation fee comes from `SystemSettings.consultation_fee_default` or doctor-specific override. Medicine price comes from `Medicine.sellingPrice` at time of invoice (snapshot stored in InvoiceItem.unitPrice). |
-| (9) | BR69 | **State Machine:** Use `VisitStateMachine.validateTransition(COMPLETED, INVOICED)`. |
+| (2) | BR65 | **Pre-fetch Rules:** Display the prescription items with their snapshotted `unitPrice` and `quantity` from PrescriptionDetail. Do NOT re-read `Medicine.salePrice` — even if an admin has changed the price since the prescription was written, the invoice must reflect the price at the time of prescription. |
+| (7) | BR66a | **Idempotency Rules:**<br/>• Look up `Invoice WHERE visitId = ?` inside the transaction.<br/>• If a row already exists, throw `Invoice already exists for this visit` and rollback. Two invoices for the same visit must never coexist. |
+| (8) | BR67 | **Invoice Code:** `invoiceCode = 'INV-' + YYYYMMDD + '-' + 5_digit_sequence`, generated inside the transaction to avoid duplicates. |
+| (9)–(11) | BR66b | **Atomic Invoice Transaction Rules (CRITICAL):**<br/>• Entire flow wrapped in `sequelize.transaction()`.<br/>• This boundary does NOT lock or update Medicine; it does NOT insert MedicineExport. Those side effects belong to UC15 (the prescription transaction) and have already committed.<br/>• `InvoiceItem.unitPrice`, `medicineName`, `quantity` are read **from PrescriptionDetail** (Memento snapshot), not from Medicine.<br/>• `InvoiceItem.prescriptionDetailId` links back to the source detail for traceability and to support later edits (UC15 update) that need to re-sync invoice items. |
+| (11) | BR68 | **Pricing Rules:** Consultation fee passed in by the Receptionist (or default from `SystemSettings.consultation_fee_default`). Medicine line `subtotal = PrescriptionDetail.quantity × PrescriptionDetail.unitPrice`. `Invoice.totalAmount = examinationFee + Σ medicine subtotals − discount`. |
+| — | BR69 | **State Notes:** Creating an invoice does NOT transition the Visit state. The Visit transitions to COMPLETED later, inside the payment transaction (UC19), when the invoice is fully paid — that transition uses `VisitStateMachine.validateTransition(currentStatus, 'COMPLETED')`. |
 
 ---
 
@@ -1678,7 +1678,7 @@ The list below contains all the necessary terms to interpret the document, inclu
 | **DoctorShift** | An assignment of a doctor to a specific shift on a specific date, with maxSlots. |
 | **Shift** | A standardized work period (e.g. morning shift 7:00–11:00). |
 | **Invoice** | A billing document for a completed visit, containing consultation fee and medicine items. |
-| **Medicine Export** | A record of medicines dispensed to a patient as part of an invoice; decrements stock. |
+| **Medicine Export** | A record of medicines dispensed to a patient. Created automatically inside the prescription transaction (UC15), in the same step as the Medicine.stock decrement (not at invoice creation time). |
 | **Medicine Import** | A record of medicines stocked in from a supplier; increments stock. |
 | **No-show** | An appointment status indicating the patient did not check in by the end of the shift. |
 | **State Machine** | A centralized utility enforcing valid status transitions for Appointment, Visit, and Invoice entities. |

@@ -73,7 +73,7 @@ Mục tiêu cốt lõi của Hệ thống Quản lý Phòng khám (Clinic Manage
 - **Tối ưu vận hành cho lễ tân**: cung cấp công cụ quản lý lịch hẹn, check-in / check-out lượt khám, đặt lịch thay cho bệnh nhân (offline), tạo hóa đơn cuối kỳ khám và xử lý hoàn tiền.
 - **Hỗ trợ chuyên môn cho bác sĩ**: hiển thị lịch trực, danh sách bệnh nhân của ca khám, giao diện ghi chẩn đoán, dấu hiệu sinh tồn, kê đơn theo danh mục thuốc của phòng khám.
 - **Quản trị & báo cáo cho admin**: dashboard tổng hợp (doanh thu, lượt khám, kho thuốc, chấm công), audit log đầy đủ thao tác, cấu hình tham số nghiệp vụ (số slot/ca, giá khám, ngưỡng cảnh báo), maintenance mode, sinh báo cáo PDF / Excel.
-- **Đảm bảo tính toàn vẹn nghiệp vụ**: ngăn đặt trùng slot ca trực, đảm bảo tính nguyên tử khi tạo hóa đơn xuất thuốc, kiểm soát chuyển trạng thái nghiệp vụ qua state machine tập trung, lưu audit trail đầy đủ cho mọi thao tác nhạy cảm.
+- **Đảm bảo tính toàn vẹn nghiệp vụ**: ngăn đặt trùng slot ca trực; đảm bảo tính nguyên tử cho hai biên giao dịch tài chính tách biệt — biên kê đơn (gồm trừ kho và xuất kho do bác sĩ kích hoạt) và biên tạo hóa đơn (đọc snapshot từ đơn thuốc); kiểm soát chuyển trạng thái nghiệp vụ qua state machine tập trung; lưu audit trail đầy đủ cho mọi thao tác nhạy cảm.
 - **Khả năng vận hành liên tục**: giữ uptime ≥ 99% cho luồng nghiệp vụ cốt lõi (đặt lịch, khám, kê đơn, thanh toán) ngay cả khi các phụ thuộc phụ trợ (email, OAuth, cache) gặp sự cố tạm thời.
 
 Việc tích hợp chặt chẽ giữa các module (Authentication, Appointment, Visit, Prescription, Inventory, Finance) phản ánh đặc thù nghiệp vụ phòng khám — nơi một lượt khám duy nhất kéo theo chuỗi nghiệp vụ liên tiếp và phải nhất quán dữ liệu xuyên module. Kiến trúc hệ thống do đó cần bảo đảm tính giao dịch (transaction) xuyên các bảng nghiệp vụ và một state machine rõ ràng cho từng thực thể.
@@ -121,7 +121,7 @@ Việc tích hợp chặt chẽ giữa các module (Authentication, Appointment,
 - **Quản lý kho thuốc**
   - CRUD danh mục thuốc.
   - Nhập kho (Medicine Import) với thông tin nhà cung cấp.
-  - Xuất kho (Medicine Export) tự động khi tạo hóa đơn có thuốc.
+  - Xuất kho (Medicine Export) tự động khi bác sĩ chốt đơn thuốc (trong cùng transaction kê đơn — không phải lúc tạo hóa đơn).
   - Cron cảnh báo thuốc sắp hết hạn.
 
 - **Tài chính**
@@ -283,7 +283,7 @@ Hệ thống được xây dựng trên một stack JavaScript / TypeScript end-
 Hệ thống được tổ chức theo mô hình **modular monolith với package-by-feature**, không tách thành các microservice riêng. Lý do:
 
 - **Quy mô phù hợp**: một phòng khám tiêu chuẩn có hàng chục đến hàng trăm lượt khám/ngày — workload chưa đến mức cần microservice.
-- **Tính giao dịch xuyên domain**: tạo hóa đơn cần đồng thời cập nhật `Invoice`, `InvoiceItem`, `Payment`, `MedicineExport`, `Medicine.stock`, `Visit.status` trong cùng một transaction. Microservice với eventual consistency sẽ làm phức tạp đáng kể logic này.
+- **Tính giao dịch xuyên domain**: luồng tài chính được tách thành **hai biên transaction** (xem §4.2.4). Biên kê đơn (UC15) atomic across `Prescription`, `PrescriptionDetail`, `Medicine.quantity`, `MedicineExport`, `Appointment.status`, `Visit.status`. Biên tạo hóa đơn (UC18) atomic across `Invoice`, `InvoiceItem` và đọc snapshot từ `PrescriptionDetail`. Microservice với eventual consistency sẽ làm phức tạp đáng kể cả hai biên này.
 - **Đội phát triển nhỏ**: modular monolith giảm overhead vận hành (chỉ một deployment, một codebase, một set test suite).
 - **Đường nâng cấp rõ**: cấu trúc package-by-feature đã sẵn sàng để tách thành microservice khi nhu cầu thực sự xuất hiện.
 
@@ -372,19 +372,19 @@ graph TB
 
 - **Chức năng chính**: kê đơn (`Prescription`) gắn với một `Visit`. Chi tiết liều / tần suất / hướng dẫn trong `PrescriptionDetail`. Reference `Medicine`.
 - **Giao tiếp với**: API Gateway, Visit module, Inventory module (validate medicine còn tồn kho), Finance module (tạo InvoiceItem từ đơn thuốc).
-- **Lưu ý triển khai**: kê đơn không tự động trừ tồn kho — chỉ trừ khi tạo hóa đơn (vì có trường hợp bệnh nhân mua thuốc bên ngoài).
+- **Lưu ý triển khai**: **module nhạy cảm thứ nhất về Data Integrity (biên kê đơn của ASR-DI-02)**. Toàn bộ luồng tạo Prescription → trừ `Medicine.quantity` (kèm row-level lock `SELECT ... FOR UPDATE` trên từng dòng Medicine) → tạo `PrescriptionDetail` (snapshot `medicineName`, `unit`, `unitPrice` — Memento Pattern) → tạo `MedicineExport` → đẩy `Appointment` và `Visit` qua state machine phải nằm trong **một transaction duy nhất** (READ COMMITTED). Sinh `prescriptionCode` trong cùng transaction. Sửa đơn / hủy đơn cũng nguyên tử với việc phục hồi tồn kho và đồng bộ lại các mục thuốc trên hóa đơn (nếu hóa đơn đã tồn tại).
 
 #### Inventory Module
 
-- **Chức năng chính**: CRUD `Medicine`. Nhập kho (`MedicineImport`) với thông tin nhà cung cấp, hạn dùng. Xuất kho (`MedicineExport`) tự động khi tạo hóa đơn. Cảnh báo thuốc sắp hết hạn / sắp hết tồn.
-- **Giao tiếp với**: API Gateway, Finance module (gọi trong cùng transaction khi tạo hóa đơn), Prescription module (validate), Scheduler (cron expiry check), Notification module.
-- **Lưu ý triển khai**: tồn kho thuốc lưu trong field `stock` của `Medicine`. Cập nhật tồn kho phải conditional (`UPDATE Medicine SET stock = stock - ? WHERE id = ? AND stock >= ?`) để tránh tồn âm dưới concurrency.
+- **Chức năng chính**: CRUD `Medicine`. Nhập kho (`MedicineImport`) với thông tin nhà cung cấp, hạn dùng. Xuất kho (`MedicineExport`) tự động khi bác sĩ chốt đơn thuốc (trong transaction kê đơn — UC15). Cảnh báo thuốc sắp hết hạn / sắp hết tồn.
+- **Giao tiếp với**: API Gateway, Prescription module (Prescription service trực tiếp lock dòng Medicine và trừ kho trong cùng transaction kê đơn), Scheduler (cron expiry check), Notification module. Finance module **không** gọi Inventory khi tạo hóa đơn — chỉ đọc snapshot từ `PrescriptionDetail`.
+- **Lưu ý triển khai**: tồn kho thuốc lưu trong field `quantity` của `Medicine`. Để tránh tồn âm dưới concurrency, mỗi dòng Medicine được khóa bằng `Medicine.findByPk(id, { lock: t.LOCK.UPDATE })` ngay đầu mỗi iteration trong vòng lặp kê đơn; sau đó so sánh `quantity` với số lượng cần kê, throw `INSUFFICIENT_STOCK_*` và rollback nếu không đủ.
 
 #### Finance Module
 
 - **Chức năng chính**: tạo hóa đơn (`Invoice` + `InvoiceItem`), ghi nhận thanh toán (`Payment`), hoàn tiền (`Refund`). Bảng lương nhân viên (`Payroll`) tự động tổng hợp từ `Attendance`.
 - **Giao tiếp với**: API Gateway, Visit module (link `visitId`), Inventory module (xuất thuốc trong cùng transaction), Notification module.
-- **Lưu ý triển khai**: **module thứ hai nhạy cảm nhất**. Toàn bộ luồng tạo hóa đơn → tạo invoice item → trừ tồn kho → tạo medicine export → cập nhật trạng thái Visit phải nằm trong **một transaction duy nhất**. Sinh `invoiceCode` trong cùng transaction. Hoàn tiền cũng nguyên tử với cập nhật trạng thái Invoice và phục hồi tồn kho khi cần.
+- **Lưu ý triển khai**: **module nhạy cảm thứ hai về Data Integrity (biên tạo hóa đơn của ASR-DI-02)**. Toàn bộ luồng tạo `Invoice` header → tạo `InvoiceItem` cho phí khám → đọc từng `PrescriptionDetail` và tạo `InvoiceItem` MEDICINE bằng cách **copy snapshot** (`medicineName`, `quantity`, `unitPrice`) từ PrescriptionDetail → cập nhật `Invoice.medicineTotalAmount` và `Invoice.totalAmount` phải nằm trong **một transaction duy nhất**. Sinh `invoiceCode` trong cùng transaction. **Biên này không động vào `Medicine.quantity` và không tạo `MedicineExport`** — những thay đổi đó đã commit ở biên kê đơn (UC15). Idempotency check (`SELECT Invoice WHERE visitId = ?`) chống tạo hóa đơn trùng cho cùng visit. Hoàn tiền cũng nguyên tử với cập nhật trạng thái Invoice; nếu hủy đơn thuốc sau khi đã có hóa đơn thì việc đồng bộ lại InvoiceItem MEDICINE và phục hồi tồn kho được làm trong transaction sửa/hủy đơn (UC15), không trong UC18.
 
 #### Shift & Attendance Module
 
@@ -514,7 +514,7 @@ graph TB
 
 ### Inventory Module
 
-- **Chức năng**: CRUD `Medicine`; nhập kho (UC-INV-01); xuất kho (UC-INV-02 — tự động khi tạo hóa đơn); cảnh báo hết hạn.
+- **Chức năng**: CRUD `Medicine`; nhập kho (UC-INV-01); xuất kho (UC-INV-02 — tự động khi bác sĩ chốt đơn thuốc, trong transaction kê đơn của UC15); cảnh báo hết hạn.
 - **Đầu vào**: thông tin thuốc, phiếu nhập, lệnh xuất.
 - **Đầu ra**: danh sách thuốc kèm tồn kho, danh sách phiếu nhập / xuất.
 - **Tương tác**: Finance, Prescription, Scheduler, Notification.
@@ -726,9 +726,88 @@ sequenceDiagram
 
 ---
 
-### 4.2.4. Tạo hóa đơn + xuất thuốc (atomic transaction)
+### 4.2.4. Kê đơn + tạo hóa đơn (hai biên transaction tách biệt)
 
-**Mô tả:** Lễ tân tạo hóa đơn cho một lượt khám đã hoàn tất. Hóa đơn gồm phí khám + mục thuốc (nếu có đơn). Toàn bộ quá trình tạo invoice header, invoice item, trừ tồn kho, ghi nhận medicine export, cập nhật trạng thái Visit phải nằm trong một transaction.
+**Mô tả:** Luồng tài chính trong hệ thống được tách thành **hai biên transaction nguyên tử độc lập** theo trách nhiệm nghiệp vụ. Đây là quyết định kiến trúc cốt lõi phục vụ ASR-DI-02.
+
+| Biên | Actor | Mục tiêu | Bảng thay đổi |
+| --- | --- | --- | --- |
+| **(a) Prescription transaction** | Bác sĩ | Chốt đơn thuốc + xuất kho ngay tại thời điểm khám | `Prescription`, `PrescriptionDetail`, `Medicine.quantity`, `MedicineExport`, `Appointment.status`, `Visit.status` |
+| **(b) Invoice transaction** | Lễ tân | Tạo hóa đơn từ snapshot đơn thuốc, không động kho | `Invoice`, `InvoiceItem` |
+
+Lý do chia hai biên: hai actor khác nhau, hai thời điểm khác nhau (bệnh nhân có thể đi xét nghiệm giữa lúc kê đơn và lúc thanh toán), tồn kho phải được trừ ngay khi bác sĩ chốt đơn để bác sĩ khác không kê được cùng thuốc lúc cuối kho, và giá thuốc phải được "đóng băng" tại thời điểm kê (Memento) để admin đổi giá sau này không ảnh hưởng hóa đơn.
+
+#### 4.2.4.a. Prescription transaction (biên kê đơn — UC15)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor D as Bác sĩ
+    participant FE as Frontend
+    participant GW as API Gateway
+    participant RX as Prescription Service
+    participant DB as MySQL
+    participant EVT as Event Bus
+    participant NOT as Notification
+
+    D->>FE: Chọn visit đang khám → chọn thuốc + liều + số lượng
+    FE->>GW: POST /api/prescriptions<br/>(visitId, medicines[])
+    GW->>RX: createPrescriptionService(input)
+    RX->>DB: BEGIN TRANSACTION (READ COMMITTED)
+
+    RX->>DB: SELECT Visit WHERE id = visitId
+    alt Visit không thuộc về doctor hoặc state không hợp lệ
+        RX-->>GW: throw UNAUTHORIZED_VISIT / VISIT_NOT_EXAMINED
+        GW-->>FE: 4xx
+    end
+
+    RX->>DB: SELECT Appointment FOR UPDATE
+    alt status = CHECKED_IN
+        RX->>RX: AppointmentStateMachine.validateTransition(CHECKED_IN, IN_PROGRESS)
+        RX->>DB: UPDATE Appointment SET status = 'IN_PROGRESS'
+    else status != IN_PROGRESS
+        RX-->>GW: throw APPOINTMENT_NOT_IN_PROGRESS
+    end
+
+    RX->>DB: SELECT Prescription WHERE visitId = ?
+    alt đã tồn tại
+        RX-->>GW: throw PRESCRIPTION_ALREADY_EXISTS
+    end
+
+    RX->>RX: generatePrescriptionCode()
+    RX->>DB: INSERT Prescription (DRAFT, totalAmount=0)
+
+    loop cho từng thuốc trong đơn
+        RX->>DB: SELECT Medicine FOR UPDATE (lock row)
+        alt medicine.status != ACTIVE
+            RX-->>GW: throw MEDICINE_NOT_ACTIVE_{name}<br/>(ROLLBACK toàn bộ)
+        else stock < requested
+            RX-->>GW: throw INSUFFICIENT_STOCK_{name}<br/>(ROLLBACK toàn bộ)
+        else đủ tồn kho
+            RX->>DB: UPDATE Medicine SET quantity = quantity - requested
+            RX->>DB: INSERT PrescriptionDetail<br/>(snapshot medicineName, unit, unitPrice)
+            RX->>DB: INSERT MedicineExport<br/>(reason = 'PRESCRIPTION_' + code)
+        end
+    end
+
+    RX->>DB: UPDATE Prescription.totalAmount
+    RX->>RX: VisitStateMachine.validateTransition(currentStatus, 'EXAMINED')
+    RX->>DB: UPDATE Visit SET status = 'EXAMINED', checkOutTime = NOW()
+    RX->>DB: COMMIT
+    RX-->>EVT: emit('PrescriptionCreated', prescription)
+    EVT->>NOT: thông báo bệnh nhân
+    GW->>GW: audit middleware ghi AuditLog
+    GW-->>FE: 201 + prescription
+```
+
+**Điểm quan trọng:**
+- Mức cô lập `READ COMMITTED` đủ vì `SELECT ... FOR UPDATE` khóa chính xác dòng cần thiết.
+- Mỗi dòng `Medicine` được khóa bằng `findByPk(id, { lock: t.LOCK.UPDATE })` ngay đầu iteration — chống tồn kho âm khi 2 bác sĩ kê cùng thuốc đồng thời.
+- `PrescriptionDetail` giữ **snapshot** `medicineName / unit / unitPrice` (Memento Pattern) — đây là cách hai biên transaction phối hợp với nhau qua dữ liệu, không qua call trực tiếp.
+- `MedicineExport.reason` đặt theo định dạng `PRESCRIPTION_{code}` để khi sửa/hủy đơn có thể tìm và xóa các bản xuất kho tương ứng.
+- Bất kỳ exception nào trong vòng lặp đều `ROLLBACK` toàn bộ — `Prescription` header đã INSERT cũng bị xóa, `Medicine.quantity` không bị trừ, không `MedicineExport` nào tồn tại, `Appointment.status` và `Visit.status` không đổi.
+
+#### 4.2.4.b. Invoice transaction (biên tạo hóa đơn — UC18)
 
 ```mermaid
 sequenceDiagram
@@ -737,45 +816,36 @@ sequenceDiagram
     participant FE as Frontend
     participant GW as API Gateway
     participant FIN as Finance Service
-    participant INV as Inventory Service
     participant DB as MySQL
     participant EVT as Event Bus
     participant NOT as Notification
 
-    R->>FE: Chọn visit cần xuất hóa đơn → review items
-    FE->>GW: POST /api/invoices<br/>(visitId, items[])
-    GW->>FIN: createInvoice(visitId, items)
+    R->>FE: Chọn visit cần xuất hóa đơn → xác nhận phí khám
+    FE->>GW: POST /api/invoices<br/>(visitId, examinationFee)
+    GW->>FIN: createInvoiceFromVisit(visitId, fee)
     FIN->>DB: BEGIN TRANSACTION
 
-    FIN->>DB: SELECT * FROM Visit WHERE id=visitId
-    alt Visit đã có hóa đơn
-        FIN-->>GW: throw ALREADY_INVOICED
+    FIN->>DB: SELECT Visit JOIN Prescription JOIN PrescriptionDetail<br/>WHERE Visit.id = visitId
+    alt Visit không tồn tại
+        FIN-->>GW: throw Visit not found
+    end
+
+    FIN->>DB: SELECT Invoice WHERE visitId = ?
+    alt đã tồn tại
+        FIN-->>GW: throw "Invoice already exists for this visit"
         GW-->>FE: 409
     end
 
     FIN->>FIN: generateInvoiceCode()
-    FIN->>DB: INSERT INTO Invoice<br/>(code, visitId, status='PENDING', total=0)
+    FIN->>DB: INSERT Invoice (UNPAID, totalAmount = examinationFee)
+    FIN->>DB: INSERT InvoiceItem (type='EXAMINATION', unitPrice=examinationFee)
 
-    loop for each item
-        alt item là phí khám
-            FIN->>DB: INSERT INTO InvoiceItem<br/>(invoiceId, type='EXAM_FEE', ...)
-        else item là thuốc
-            FIN->>INV: dispense(medicineId, qty, tx)
-            INV->>DB: UPDATE Medicine<br/>SET stock = stock - qty<br/>WHERE id = ? AND stock >= qty
-            alt affected rows = 1
-                INV->>DB: INSERT INTO MedicineExport (...)
-                FIN->>DB: INSERT INTO InvoiceItem<br/>(invoiceId, type='MEDICINE', medicineId, qty, ...)
-            else affected rows = 0
-                INV-->>FIN: throw STOCK_INSUFFICIENT
-                FIN->>DB: ROLLBACK
-                FIN-->>GW: error
-                GW-->>FE: 409 STOCK_INSUFFICIENT
-            end
-        end
+    loop cho từng PrescriptionDetail của visit
+        FIN->>DB: INSERT InvoiceItem<br/>(type='MEDICINE',<br/> prescriptionDetailId,<br/> medicineName/quantity/unitPrice<br/> COPY từ PrescriptionDetail — snapshot read)
+        Note over FIN,DB: KHÔNG động vào Medicine.<br/>KHÔNG tạo MedicineExport.<br/>Những thay đổi đó đã commit ở biên (a).
     end
 
-    FIN->>DB: UPDATE Invoice SET total=? WHERE id=?
-    FIN->>DB: UPDATE Visit SET status='INVOICED'<br/>(qua VisitStateMachine)
+    FIN->>DB: UPDATE Invoice<br/>SET medicineTotalAmount = Σ subtotals,<br/>    totalAmount = examinationFee + medicineTotalAmount - discount
     FIN->>DB: COMMIT
     FIN-->>EVT: emit('InvoiceCreated', invoice)
     EVT->>NOT: thông báo bệnh nhân
@@ -785,9 +855,24 @@ sequenceDiagram
 ```
 
 **Điểm quan trọng:**
-- `UPDATE Medicine SET stock = stock - qty WHERE id = ? AND stock >= qty` là cập nhật điều kiện — không cần lock vì điều kiện nằm trong `WHERE`. Nếu `affectedRows = 0` nghĩa là không đủ tồn kho hoặc đã có người khác trừ trước.
-- `VisitStateMachine` kiểm tra `Visit.status` đang là `COMPLETED` mới cho chuyển sang `INVOICED`.
-- Sinh `invoiceCode` (dạng `INV-YYYYMMDD-XXXXX`) trong cùng transaction.
+- Biên này **không** có `SELECT ... FOR UPDATE` trên Medicine và **không** có `UPDATE Medicine`. Tồn kho đã được trừ chính xác ở biên (a).
+- `InvoiceItem.unitPrice`, `medicineName`, `quantity` được đọc trực tiếp từ `PrescriptionDetail` (snapshot). Nếu admin đổi `Medicine.salePrice` giữa lúc kê đơn và lúc tạo hóa đơn, hóa đơn vẫn dùng giá tại thời điểm kê — yêu cầu kế toán cơ bản.
+- Idempotency check (`SELECT Invoice WHERE visitId = ?`) chống tạo trùng hóa đơn cho cùng visit.
+- Việc chuyển `Visit.status` sang `COMPLETED` **không** xảy ra ở biên này — chỉ xảy ra ở biên thanh toán (`addPaymentService` trong UC19) khi hóa đơn được trả đủ.
+
+#### 4.2.4.c. Sửa / hủy đơn thuốc sau khi đã có hóa đơn
+
+Hai biên trên là *forward path*. Khi bác sĩ sửa hoặc hủy đơn thuốc sau khi hóa đơn đã được tạo, `updatePrescriptionService` / `cancelPrescriptionService` đảm bảo nguyên tử xuyên hai biên trong **một transaction duy nhất**:
+
+1. Lock `Prescription` và `Invoice` của visit (nếu có hóa đơn).
+2. Xóa toàn bộ `InvoiceItem` MEDICINE cũ.
+3. Phục hồi `Medicine.quantity` theo từng `PrescriptionDetail` cũ (cộng lại số lượng đã trừ).
+4. Xóa `PrescriptionDetail` cũ và `MedicineExport` có reason = `PRESCRIPTION_{code}`.
+5. Trừ tồn kho mới theo đơn mới (với `FOR UPDATE` lock), tạo `PrescriptionDetail` mới (snapshot mới) và `MedicineExport` mới.
+6. Tạo `InvoiceItem` MEDICINE mới (đọc snapshot từ PrescriptionDetail mới).
+7. Cập nhật lại `Invoice.medicineTotalAmount` và `Invoice.totalAmount`.
+
+Tất cả nằm trong một transaction → nếu một bước fail, kho và hóa đơn đều quay về trạng thái trước update.
 
 ---
 
@@ -1138,7 +1223,7 @@ Cấu trúc package-by-feature hiện tại sẵn sàng để tách thành micro
 | SQL injection | Input độc hại lọt vào câu query. | Cao | Sequelize dùng parameterized query mặc định. `express-validator` validate input. **Tuyệt đối không** dùng raw query với string concat. | Audit log + rate limit phát hiện. Cập nhật ORM, vá ngay. |
 | **Rủi ro Liên quan đến Dữ liệu** | | | | |
 | Đặt lịch trùng slot dưới concurrency cao | 2 người đặt cùng slot cuối → vượt số slot tối đa. | Cao | Transaction + `SELECT ... FOR UPDATE` trên `DoctorShift`. Test concurrent đầy đủ. | Audit log phát hiện. Liên hệ bệnh nhân để dời lịch. Hoàn tiền nếu cần. |
-| Hóa đơn mồ côi (invoice nhưng không có inventory export) | Transaction tạo hóa đơn không atomic. | Cao | Tất cả thao tác liên quan đến tài chính + tồn kho nằm trong cùng một transaction. Sử dụng savepoint khi cần rollback một phần. Test inject lỗi. | Script đối chiếu định kỳ. Sửa thủ công với audit log. |
+| Lệch dữ liệu giữa hai biên transaction (đơn thuốc đã chốt nhưng hóa đơn lệch số lượng / giá; hoặc kho đã trừ nhưng prescription không tồn tại) | Một trong hai biên transaction không atomic, hoặc luồng sửa đơn sau khi có hóa đơn không đồng bộ lại được InvoiceItem. | Cao | Biên kê đơn và biên tạo hóa đơn đều bọc trong `sequelize.transaction()` (Template Method). InvoiceItem đọc snapshot trực tiếp từ PrescriptionDetail (Memento) nên không thể lệch giá. Luồng sửa / hủy đơn thuốc sau khi có hóa đơn nằm trong một transaction duy nhất phục hồi tồn kho cũ + trừ kho mới + đồng bộ InvoiceItem. Test inject lỗi giữa từng bước. | Script đối chiếu định kỳ (so PrescriptionDetail vs InvoiceItem, so MedicineExport vs Medicine.quantity). Sửa thủ công với audit log. |
 | Mất audit log | Audit middleware ghi bất đồng bộ + lỗi → mất audit cho thao tác. | Trung bình | Audit ghi với error handling và alert. Cân nhắc đồng bộ cho thao tác critical (xóa user, refund > N triệu). | Theo dõi tỉ lệ audit failure. Báo cáo định kỳ. |
 | Tăng trưởng dữ liệu vượt mức | Sau 3–5 năm, các bảng nghiệp vụ chính có hàng triệu bản ghi → query chậm. | Trung bình | Chỉ mục có chủ đích từ đầu (đã có migration). Phân trang bắt buộc. Sẵn sàng partitioning theo thời gian cho `AuditLog`, `Appointment`, `Visit`. | Archiving data cũ sang storage rẻ. Tạo partition mới. Tối ưu query. |
 | Lỗi migration trong production | Schema migration trên DB lớn lỗi giữa chừng → schema không nhất quán. | Rất cao | Test migration trên copy production trước. Backup ngay trước khi migrate. Migration nhỏ + atomic. Maintenance mode trong quá trình migrate. | Rollback migration (down). Restore từ backup nếu rollback không khả thi. |
