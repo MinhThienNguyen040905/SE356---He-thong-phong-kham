@@ -9,3 +9,8 @@ docker exec -it clinic-redis redis-cli FLUSHALL
 # 3. Seed lại
 
 npm run seed:demo
+
+doctor1@clinic.local
+recep@clinic.local
+admin@clinic.local
+patient1@example.com
